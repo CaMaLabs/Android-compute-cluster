@@ -1,204 +1,216 @@
 # Universal Compute Swarm
 
-A device-agnostic distributed-computing controller and worker protocol derived from the useful ideas in smartphone-cluster projects such as LiveDewStream, but redesigned for heterogeneous devices and remote/WAN operation.
+A heterogeneous distributed-computing controller and worker protocol for Android phones, Linux/Windows/macOS machines, Raspberry Pi/SBCs, servers, and future GPU/accelerator agents.
 
-## What it does
+The design is inspired by the useful real-device ideas in LiveDewStream, but removes its Android/ADB/TensorFlow-specific assumptions. Workers connect **outbound** to a controller, advertise what they can do, lease compatible work, and return results. Devices can be on the same hotspot or distributed across the Internet behind NAT.
 
-- Android/Termux, Linux, Windows, macOS and SBCs can use the included Python agent.
-- Any other device can join by implementing the small HTTP/JSON protocol in `docs/PROTOCOL.md`.
-- Workers advertise CPU, OS, architecture, memory, labels and locally installed task capabilities.
-- Jobs are scheduled only onto compatible devices.
-- Workers connect **outbound** to the controller, so phones behind hotspots, NAT or home routers need no incoming ports.
-- Expiring leases recover work automatically when a device disconnects.
-- Long-running work renews its lease while computing.
-- Per-device credentials are issued at enrollment.
-- Android thermal/battery throttling remains supported.
-- No arbitrary remote shell or server-pushed executable code.
+## Included workers
+
+- `worker/` — portable Python/Termux worker.
+- `rust-worker/` — native cross-platform worker for desktops, servers, and SBCs.
+- `android-worker/` — native Android foreground-service worker.
+
+All three use the same controller API and task/capability vocabulary.
+
+## Security model
+
+The controller does not send shell commands, executables, source code, or arbitrary command lines. Workers advertise locally installed capabilities such as `task:prime_count`, `cuda`, `vulkan`, or `tflite`, and the scheduler only leases matching jobs.
+
+The Rust worker can run optional local command plugins, but those commands must be configured locally by the device owner. The controller can only select the registered task name and provide JSON input.
+
+Remote/public controllers must use HTTPS. Plain HTTP is only intended for loopback or trusted LAN/hotspot use.
 
 ## Architecture
 
 ```text
-                         Internet / private LAN
-                                  |
-                         HTTPS controller API
-                       FastAPI + SQLite (MVP)
-                                  |
-          +-----------------------+-----------------------+
-          |                       |                       |
-   Android / Termux         Linux / Windows         SBC / custom agent
-      ARM worker              x86/ARM worker          any implementation
-          |                       |                       |
-     local plugins             local plugins            local plugins
+                       HTTPS / trusted-LAN HTTP
+
+ Android APK  ───────────────┐
+ Python/Termux ──────────────┤
+ Linux/RPi Rust worker ──────┤
+ Windows/macOS Rust worker ──┼──> FastAPI controller
+ Remote server ──────────────┤       ├── capability scheduler
+ Future GPU agent ───────────┘       ├── lease/recovery queue
+                                     ├── SQLite state
+                                     └── SHA-256 artifact store
 ```
 
-The same controller can therefore manage a few phones on a hotspot or a geographically distributed collection of machines.
+A worker disappearing during a task does not lose the work unit. Its lease expires and the unit returns to the queue. Long-running agents renew leases in the background.
 
-## 1. Run the controller
+## Quick start: controller
 
 ```bash
-cd coordinator
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r coordinator/requirements.txt
 
-export SWARM_ADMIN_TOKEN='replace-with-a-long-random-admin-token'
-export SWARM_ENROLLMENT_TOKEN='replace-with-a-long-random-enrollment-token'
-uvicorn app:app --host 0.0.0.0 --port 8765
+export SWARM_ADMIN_TOKEN='replace-with-a-long-secret'
+export SWARM_ENROLLMENT_TOKEN='replace-with-another-long-secret'
+uvicorn --app-dir coordinator app:app --host 0.0.0.0 --port 8765
 ```
 
-For a LAN/hotspot test, the controller can be reached at `http://<controller-lan-ip>:8765`.
+For a remote controller, see [`docs/REMOTE_DEPLOYMENT.md`](docs/REMOTE_DEPLOYMENT.md). A Docker Compose deployment is included.
 
-For remote devices, put the API behind TLS and use a public DNS name such as:
-
-```text
-https://swarm.example.com
-```
-
-Caddy/nginx, a cloud load balancer, or a private overlay network such as Tailscale can terminate TLS. The worker refuses plaintext non-local controller URLs by default.
-
-## 2. Join a Python-capable device
-
-The included worker works on conventional Python 3 platforms.
-
-### Linux / macOS / Windows
+## Quick start: Python/Termux worker
 
 ```bash
-cd worker
-python -m pip install -r requirements.txt
-export SWARM_CONTROLLER_URL='https://swarm.example.com'
-export SWARM_ENROLLMENT_TOKEN='replace-with-the-enrollment-token'
-python worker.py
+pip install -r worker/requirements.txt
+export SWARM_CONTROLLER_URL=http://127.0.0.1:8765
+export SWARM_ENROLLMENT_TOKEN='replace-with-another-long-secret'
+python worker/worker.py
 ```
 
-### Android / Termux
-
-```bash
-pkg update
-pkg install python termux-api
-cd worker
-pip install -r requirements.txt
-export SWARM_CONTROLLER_URL='https://swarm.example.com'
-export SWARM_ENROLLMENT_TOKEN='replace-with-the-enrollment-token'
-python worker.py
-```
-
-For a trusted LAN test using plaintext HTTP, explicitly allow it:
+On a trusted LAN or hotspot where the controller is another machine:
 
 ```bash
 export SWARM_ALLOW_INSECURE_REMOTE=1
-export SWARM_CONTROLLER_URL='http://192.168.1.10:8765'
+export SWARM_CONTROLLER_URL=http://192.168.1.10:8765
+python worker/worker.py
 ```
 
-After the first successful enrollment, each device stores its own identity/token in:
+For Internet use, use `https://...` instead.
 
-```text
-~/.compute-swarm-identity.json
-```
-
-The shared enrollment token is not needed for normal reconnects afterward.
-
-## 3. Submit work
-
-The controller accepts arbitrary JSON work units, but a matching task plugin must already be installed on candidate devices.
-
-Prime-counting example:
+## Rust worker
 
 ```bash
-curl -X POST http://127.0.0.1:8765/jobs/range \
-  -H 'Authorization: Bearer replace-with-a-long-random-admin-token' \
+cd rust-worker
+cargo build --release
+export SWARM_CONTROLLER_URL=https://swarm.example.com
+export SWARM_ENROLLMENT_TOKEN='replace-with-another-long-secret'
+./target/release/compute-swarm-worker
+```
+
+The Rust worker is intended for PCs, servers, Raspberry Pis, and other devices where a small native daemon is preferable to Python.
+
+## Native Android worker
+
+Open `android-worker/` in Android Studio and build the app. Enter the controller URL and enrollment token, then tap **Join swarm**. It runs as a foreground service with battery/temperature-aware pausing.
+
+The Android task registry is in:
+
+```text
+android-worker/app/src/main/java/com/camalabs/computeswarm/TaskRegistry.kt
+```
+
+That is the extension point for Kotlin, NDK/C++, Vulkan Compute, TFLite, or other locally installed Android kernels.
+
+## Creating jobs
+
+A normal job is JSON. The worker must advertise `task:<kind>` plus every requirement:
+
+```bash
+curl -X POST http://127.0.0.1:8765/jobs \
+  -H "Authorization: Bearer $SWARM_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
     "kind":"prime_count",
-    "start":2,
-    "end":2000000,
-    "chunk_size":100000,
+    "units":[
+      {"start":2,"end":500000},
+      {"start":500000,"end":1000000}
+    ],
     "requirements":{"capabilities":["cpu"]}
   }'
 ```
 
-Generic units example:
+Range jobs let the controller create chunks:
 
 ```bash
-curl -X POST http://127.0.0.1:8765/jobs \
-  -H 'Authorization: Bearer replace-with-a-long-random-admin-token' \
+curl -X POST http://127.0.0.1:8765/jobs/range \
+  -H "Authorization: Bearer $SWARM_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
-    "kind":"vector_sum",
-    "units":[
-      {"values":[1,2,3]},
-      {"values":[4,5,6]}
-    ]
+    "kind":"prime_count",
+    "start":2,
+    "end":100000000,
+    "chunk_size":1000000,
+    "requirements":{"capabilities":["cpu"]}
   }'
 ```
 
-Inspect the swarm:
+## Large files / artifacts
+
+Large inputs are uploaded once and referenced by SHA-256 artifact ID instead of being embedded in job JSON.
+
+Upload an input:
 
 ```bash
-curl -H 'Authorization: Bearer replace-with-a-long-random-admin-token' \
-  http://127.0.0.1:8765/status
+curl -X POST 'http://127.0.0.1:8765/artifacts?name=input.bin' \
+  -H "Authorization: Bearer $SWARM_ADMIN_TOKEN" \
+  -H 'Content-Type: application/octet-stream' \
+  --data-binary @input.bin
 ```
 
-Inspect one job and its results:
-
-```bash
-curl -H 'Authorization: Bearer replace-with-a-long-random-admin-token' \
-  http://127.0.0.1:8765/jobs/JOB_ID
-```
-
-## Adding a workload
-
-The worker has a tiny plugin API. A local module can register a task:
-
-```python
-from swarm_plugin import task
-
-@task("vector_sum")
-def vector_sum(payload):
-    return {"sum": sum(payload["values"])}
-```
-
-Then start that device with:
-
-```bash
-export SWARM_PLUGIN_MODULES=plugin_example
-python worker.py
-```
-
-The worker advertises `task:vector_sum`, so only devices with that plugin installed receive those units.
-
-For native performance, the same plugin boundary can call C/C++, Rust, CUDA, Vulkan compute, TensorFlow Lite, ONNX Runtime, or hardware-specific libraries without changing the controller.
-
-## Heterogeneous scheduling
-
-A job may target device properties:
+The response's `artifact_id` can be used in a work-unit payload:
 
 ```json
 {
-  "kind": "model_infer",
-  "units": [{"blob_id":"..."}],
-  "requirements": {
-    "capabilities": ["cuda"],
-    "os": ["Linux", "Windows"],
-    "arch": ["x86_64", "AMD64"],
-    "min_memory_mb": 8192,
-    "labels": {"site":"garage"}
-  }
+  "alias":"input",
+  "artifact_inputs":[
+    {
+      "artifact_id":"<sha256>",
+      "alias":"input",
+      "name":"input.bin"
+    }
+  ]
 }
 ```
 
-Every job also implicitly requires `task:<kind>`.
+The Python, Rust, and Android workers download the file into an isolated per-unit work directory and verify its SHA-256 checksum before the task runs.
 
-## Direction from LiveDewStream
+Trusted local tasks can declare files created inside that sandbox as outputs; the agent uploads them to the controller and returns artifact metadata in the work-unit result.
 
-LiveDewStream demonstrated useful real-phone cluster concepts: device registration, job scheduling, Android metrics, battery-aware experiments and mobile inference. This project keeps those ideas but removes the assumptions that every node is Android, physically attached through ADB, or running TensorFlow Lite.
+See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the complete wire and artifact contract.
 
-## Planned next layers
+## Capability scheduling
 
-- Native Kotlin Android foreground-service agent
-- NDK/Vulkan task plugin SDK
-- Native Rust agent for Linux/Windows/macOS/ARM SBCs
-- PostgreSQL/Redis backend for multi-controller scale
-- Web dashboard and job submission UI
-- mTLS or public-key device identities
-- Optional peer data transfer while the controller remains the authority
-- Artifact/blob store for large input and result payloads
+Examples of worker-advertised capabilities:
+
+```text
+cpu
+rust
+python
+kotlin
+cuda
+vulkan
+tflite
+os:linux
+os:android
+arch:x86_64
+arch:aarch64
+task:prime_count
+task:model_infer
+```
+
+A job may additionally constrain:
+
+- operating system
+- architecture
+- minimum CPU cores
+- minimum RAM
+- arbitrary labels such as site/rack/owner
+
+This lets one controller coordinate a mixed swarm without assuming all nodes have the same hardware.
+
+## Built-in demonstration tasks
+
+All current workers implement:
+
+- `prime_count`
+- `monte_carlo_pi`
+- `sha256_artifact`
+- `text_artifact`
+
+The demos are deliberately simple. Real workloads should be added as locally installed task handlers/plugins.
+
+## Tests
+
+```bash
+pip install -r coordinator/requirements.txt -r worker/requirements.txt pytest httpx
+pytest -q
+```
+
+GitHub Actions runs the Python test suite, `cargo check` for the Rust worker, and a debug APK build for the native Android worker.
+
+## Next extensions
+
+The protocol is intentionally compatible with future workers written in other languages. Logical next backends include CUDA, Vulkan Compute, ONNX Runtime, TFLite, and object-storage-backed artifacts.
