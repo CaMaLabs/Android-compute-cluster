@@ -15,6 +15,16 @@ jobs:
       - run: pip install -r coordinator/requirements.txt -r worker/requirements.txt pytest httpx
       - run: pytest -q
 
+  onnx-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r worker/requirements.txt -r worker/requirements-onnx.txt pytest onnx
+      - run: pytest -q tests/test_onnx_accelerator.py
+
   rust-worker:
     runs-on: ubuntu-latest
     steps:
