@@ -10,6 +10,10 @@ android {
     compileSdk = 35
     ndkVersion = "29.0.14206865"
 
+    buildFeatures {
+        buildConfig = true
+    }
+
     defaultConfig {
         applicationId = "com.camalabs.computeswarm"
         minSdk = 26
