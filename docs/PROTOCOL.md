@@ -1,54 +1,153 @@
-# Swarm agent protocol
+# Swarm wire protocol v0.3
 
-The protocol is intentionally HTTP/JSON and implementation-neutral. A device does not need Python or Android; it only needs to implement these operations.
+The protocol is intentionally small and transport-neutral. Current agents use JSON over HTTP(S) with worker-initiated long polling. Public controllers must be exposed through HTTPS.
 
-## Trust model
+## Authentication
 
-There are two credentials:
+There are three credential classes:
 
-- `SWARM_ADMIN_TOKEN`: controller/operator credential for job submission and status.
-- `SWARM_ENROLLMENT_TOKEN`: one-time-ish shared enrollment credential used to join a new device.
+- **Admin token** — submits jobs, uploads input artifacts, reads job/status data.
+- **Enrollment token** — permits a new device to obtain a unique worker ID/token.
+- **Device token** — unique to one enrolled worker and used for registration, heartbeats, leasing, result submission, and artifact transfer.
 
-Enrollment returns a unique per-device bearer token. The device stores that token locally and uses it for all later worker calls.
+The controller never transmits shell commands, executables, source code, or plugin installation instructions. A worker advertises `task:<kind>` capabilities for task handlers already installed locally.
 
-For remote/WAN deployments the controller URL should be HTTPS. Workers initiate every connection outbound, so no worker needs an inbound firewall/NAT port.
+## Enrollment
 
-## Worker lifecycle
+`POST /workers/enroll`
 
-1. `POST /workers/enroll` using the enrollment token.
-2. Store `worker_id` and returned `device_token`.
-3. `POST /workers/{worker_id}/register` using the device token.
-4. Send periodic heartbeat telemetry.
-5. Long-poll `POST /workers/{worker_id}/lease?wait_seconds=15`.
-6. Execute only a locally installed task handler matching `kind`.
-7. Renew the lease while a long task is running.
-8. Submit either a result or a failure.
-
-## Capability scheduling
-
-Workers advertise strings such as:
+Authorization: enrollment token.
 
 ```json
-[
-  "cpu",
-  "python",
-  "os:linux",
-  "arch:x86_64",
-  "task:prime_count",
-  "task:vector_sum"
-]
+{"name":"pixel-worker"}
 ```
 
-Jobs may additionally require OS, architecture, memory, core count, capabilities, or exact labels. The server never sends a unit to a worker that lacks `task:<kind>`.
+Response:
 
-This lets specialized agents coexist in one swarm. Examples:
+```json
+{
+  "worker_id":"uuid",
+  "device_token":"unique-secret",
+  "lease_seconds":120
+}
+```
 
-- Android/ARM phone: `cpu`, `task:foo`, later `vulkan`
-- Linux workstation: `cpu`, `cuda`, `task:foo`
-- Raspberry Pi: `cpu`, `gpio`, `task:sensor_reduce`
-- Windows PC: `cpu`, `directml`, `task:model_infer`
-- Browser/WebAssembly agent: a future implementation of the same lease protocol
+## Registration
 
-## No remote shell
+`POST /workers/{worker_id}/register`
 
-The controller does not send commands, scripts, executables, or Python source. Work units contain a typed `kind` plus JSON payload. Code must already be installed on the device as a task plugin. This is deliberate: it keeps enrollment from becoming arbitrary remote code execution.
+Authorization: device token.
+
+```json
+{
+  "name":"pixel-worker",
+  "os_name":"Android",
+  "platform":"Android 16",
+  "arch":"arm64-v8a",
+  "cores":8,
+  "memory_mb":8192,
+  "benchmark":250000,
+  "capabilities":["cpu","task:prime_count","task:sha256_artifact"],
+  "labels":{"site":"shop"},
+  "agent_version":"0.3.0-android"
+}
+```
+
+## Work units
+
+Admins create jobs with `/jobs` or `/jobs/range`. Workers long-poll:
+
+`POST /workers/{worker_id}/lease?wait_seconds=15`
+
+A lease contains a task kind and JSON payload:
+
+```json
+{
+  "work": {
+    "lease_id":"uuid",
+    "job_id":"uuid",
+    "unit_id":"uuid",
+    "sequence":0,
+    "kind":"sha256_artifact",
+    "payload": {
+      "alias":"input",
+      "artifact_inputs":[
+        {"artifact_id":"<sha256>","alias":"input","name":"input.bin"}
+      ]
+    }
+  }
+}
+```
+
+The scheduler leases the unit only to a device which advertises `task:sha256_artifact` plus every capability/resource/label requirement attached to the job.
+
+## Lease renewal
+
+Long tasks and artifact transfers renew through:
+
+`POST /workers/{worker_id}/leases/{lease_id}/renew`
+
+If a worker disappears, an expired lease is automatically returned to the queue.
+
+## Artifact store
+
+Artifacts are SHA-256 content-addressed and deduplicated.
+
+Admin input upload:
+
+`POST /artifacts?name=input.bin`
+
+Worker output upload:
+
+`POST /workers/{worker_id}/artifacts?name=result.bin`
+
+The request body is raw bytes. Optional `X-Artifact-Sha256` lets the controller reject a corrupted upload. The response contains:
+
+```json
+{
+  "artifact_id":"<sha256>",
+  "sha256":"<sha256>",
+  "name":"input.bin",
+  "content_type":"application/octet-stream",
+  "size_bytes":1048576
+}
+```
+
+Authenticated download:
+
+`GET /artifacts/{artifact_id}`
+
+Workers additionally send `X-Worker-ID: <worker_id>` because the bearer token is device-scoped. A worker is allowed to download an artifact only while it holds an active lease whose payload references that artifact ID.
+
+## Local agent artifact contract
+
+The wire protocol only knows artifact IDs. Agent implementations translate them into local sandbox files before invoking a task.
+
+A payload may include:
+
+```json
+{
+  "artifact_inputs":[
+    {"artifact_id":"<sha256>","alias":"weights","name":"model.bin"}
+  ]
+}
+```
+
+The Python, Rust, and Android agents expose local paths to their task handler. A trusted local task may declare files created inside its unit sandbox as outputs. The agent uploads those files and replaces the private output declaration with public artifact metadata in the submitted result.
+
+## Result
+
+`POST /workers/{worker_id}/units/{unit_id}/result`
+
+```json
+{
+  "lease_id":"uuid",
+  "result": {
+    "score":0.98,
+    "artifacts":[{"artifact_id":"<sha256>","name":"output.bin"}]
+  },
+  "elapsed_ms":4123.5
+}
+```
+
+Failures use `/failure` with a short error string and explicit retry flag.
