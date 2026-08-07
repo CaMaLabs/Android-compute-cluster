@@ -5,6 +5,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val swarmSigningKeystore = System.getenv("SWARM_SIGNING_KEYSTORE")
+
 android {
     namespace = "com.camalabs.computeswarm"
     compileSdk = 35
@@ -31,7 +33,23 @@ android {
         }
     }
 
+    if (!swarmSigningKeystore.isNullOrBlank()) {
+        signingConfigs {
+            create("swarmDebug") {
+                storeFile = file(swarmSigningKeystore)
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
+
     buildTypes {
+        getByName("debug") {
+            if (!swarmSigningKeystore.isNullOrBlank()) {
+                signingConfig = signingConfigs.getByName("swarmDebug")
+            }
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
