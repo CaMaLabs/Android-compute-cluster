@@ -1,0 +1,6 @@
+{
+  "my_local_task": {
+    "command": "/opt/swarm/tasks/my_local_task",
+    "args": []
+  }
+}
