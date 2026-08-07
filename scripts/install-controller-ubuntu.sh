@@ -66,7 +66,7 @@ User=$SERVICE_USER
 Group=$SERVICE_USER
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$ENV_FILE
-ExecStart=$APP_DIR/.venv/bin/uvicorn --app-dir $APP_DIR/coordinator app:app --host 0.0.0.0 --port $PORT
+ExecStart=$APP_DIR/.venv/bin/uvicorn --app-dir $APP_DIR/coordinator web:app --host 0.0.0.0 --port $PORT
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -81,10 +81,17 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now "$SERVICE_NAME"
+systemctl restart "$SERVICE_NAME"
 
 sleep 1
 if ! systemctl is-active --quiet "$SERVICE_NAME"; then
   echo "Controller failed to start. Recent logs:" >&2
+  journalctl -u "$SERVICE_NAME" -n 50 --no-pager >&2
+  exit 1
+fi
+
+if ! curl --fail --silent --show-error "http://127.0.0.1:$PORT/health" >/dev/null; then
+  echo "Controller service is active but the local health check failed." >&2
   journalctl -u "$SERVICE_NAME" -n 50 --no-pager >&2
   exit 1
 fi
@@ -98,13 +105,14 @@ cat <<EOF
 Compute Swarm controller installed successfully.
 
 Service:        $SERVICE_NAME
-Controller URL: http://${IP_ADDR:-127.0.0.1}:$PORT
-Local URL:      http://127.0.0.1:$PORT
+Dashboard:      http://${IP_ADDR:-127.0.0.1}:$PORT/
+API docs:       http://${IP_ADDR:-127.0.0.1}:$PORT/docs
+Local health:   http://127.0.0.1:$PORT/health
 
 Android enrollment token:
 $ENROLLMENT_TOKEN
 
-Admin token:
+Dashboard/admin token:
 $ADMIN_TOKEN
 
 Useful commands:
@@ -112,6 +120,9 @@ Useful commands:
   sudo journalctl -u $SERVICE_NAME -f
   sudo systemctl restart $SERVICE_NAME
   sudo cat $ENV_FILE
+
+If another device cannot reach the dashboard and UFW is active, allow the LAN port with:
+  sudo ufw allow $PORT/tcp
 
 For access across the public Internet, put the controller behind HTTPS rather than exposing plain HTTP directly.
 EOF
