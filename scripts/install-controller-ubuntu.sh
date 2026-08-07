@@ -6,6 +6,7 @@ SERVICE_USER="${SWARM_SERVICE_USER:-compute-swarm}"
 SERVICE_NAME="${SWARM_SERVICE_NAME:-compute-swarm-controller}"
 ENV_DIR="/etc/compute-swarm"
 ENV_FILE="$ENV_DIR/controller.env"
+DATA_DIR="${SWARM_DATA_DIR:-/var/lib/compute-swarm}"
 PORT="${SWARM_PORT:-8765}"
 REPO_URL="${SWARM_REPO_URL:-https://github.com/CaMaLabs/Android-compute-cluster.git}"
 REPO_BRANCH="${SWARM_REPO_BRANCH:-agent/universal-compute-swarm}"
@@ -36,7 +37,7 @@ python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install --upgrade pip wheel
 "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/coordinator/requirements.txt"
 
-mkdir -p "$ENV_DIR"
+mkdir -p "$ENV_DIR" "$DATA_DIR/artifacts"
 chmod 700 "$ENV_DIR"
 
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -45,13 +46,13 @@ if [[ ! -f "$ENV_FILE" ]]; then
   cat > "$ENV_FILE" <<EOF
 SWARM_ADMIN_TOKEN=$ADMIN_TOKEN
 SWARM_ENROLLMENT_TOKEN=$ENROLLMENT_TOKEN
-SWARM_DATA_DIR=/var/lib/compute-swarm
+SWARM_DB=$DATA_DIR/swarm.db
+SWARM_ARTIFACT_DIR=$DATA_DIR/artifacts
 EOF
   chmod 600 "$ENV_FILE"
 fi
 
-mkdir -p /var/lib/compute-swarm
-chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR" /var/lib/compute-swarm
+chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR" "$DATA_DIR"
 
 cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
@@ -72,7 +73,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/compute-swarm
+ReadWritePaths=$DATA_DIR
 
 [Install]
 WantedBy=multi-user.target
