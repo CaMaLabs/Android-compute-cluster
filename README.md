@@ -1,22 +1,22 @@
 # Universal Compute Swarm
 
-A heterogeneous distributed-computing controller and worker protocol for Android phones, Linux/Windows/macOS machines, Raspberry Pi/SBCs, servers, and future GPU/accelerator agents.
+A heterogeneous distributed-computing controller and worker protocol for Android phones, Linux/Windows/macOS machines, Raspberry Pi/SBCs, servers, and GPU/accelerator nodes.
 
 The design is inspired by the useful real-device ideas in LiveDewStream, but removes its Android/ADB/TensorFlow-specific assumptions. Workers connect **outbound** to a controller, advertise what they can do, lease compatible work, and return results. Devices can be on the same hotspot or distributed across the Internet behind NAT.
 
 ## Included workers
 
-- `worker/` — portable Python/Termux worker.
+- `worker/` — portable Python/Termux worker, with optional CUDA/CuPy and ONNX Runtime backends.
 - `rust-worker/` — native cross-platform worker for desktops, servers, and SBCs.
-- `android-worker/` — native Android foreground-service worker.
+- `android-worker/` — native Android foreground-service worker with LiteRT and optional Vulkan Compute.
 
-All three use the same controller API and task/capability vocabulary.
+All workers use the same controller API and task/capability vocabulary.
 
 ## Security model
 
-The controller does not send shell commands, executables, source code, or arbitrary command lines. Workers advertise locally installed capabilities such as `task:prime_count`, `cuda`, `vulkan`, or `tflite`, and the scheduler only leases matching jobs.
+The controller does not send shell commands, executables, source code, CUDA kernels, Vulkan shaders, or arbitrary command lines. Workers advertise locally installed capabilities and the scheduler only leases matching jobs.
 
-The Rust worker can run optional local command plugins, but those commands must be configured locally by the device owner. The controller can only select the registered task name and provide JSON input.
+The Rust worker can run optional local command plugins, but those commands must be configured locally by the device owner. The controller can only select the registered task name and provide JSON/artifact input.
 
 Remote/public controllers must use HTTPS. Plain HTTP is only intended for loopback or trusted LAN/hotspot use.
 
@@ -29,8 +29,8 @@ Remote/public controllers must use HTTPS. Plain HTTP is only intended for loopba
  Python/Termux ──────────────┤
  Linux/RPi Rust worker ──────┤
  Windows/macOS Rust worker ──┼──> FastAPI controller
- Remote server ──────────────┤       ├── capability scheduler
- Future GPU agent ───────────┘       ├── lease/recovery queue
+ CUDA/ONNX PC ───────────────┤       ├── capability scheduler
+ Remote server ──────────────┘       ├── lease/recovery queue
                                      ├── SQLite state
                                      └── SHA-256 artifact store
 ```
@@ -70,6 +70,35 @@ python worker/worker.py
 
 For Internet use, use `https://...` instead.
 
+## GPU and inference backends
+
+See [`docs/ACCELERATORS.md`](docs/ACCELERATORS.md) for installation and job examples.
+
+Python workers automatically discover optional locally installed accelerator libraries:
+
+```text
+CUDA/CuPy        cuda, cuda:cupy
+ONNX Runtime     onnx, onnxruntime, optionally onnx:cuda
+```
+
+Install examples:
+
+```bash
+# CUDA 12.x
+pip install -r worker/requirements.txt -r worker/requirements-cuda12.txt
+
+# CUDA 13.x
+pip install -r worker/requirements.txt -r worker/requirements-cuda13.txt
+
+# ONNX CPU
+pip install -r worker/requirements.txt -r worker/requirements-onnx.txt
+
+# ONNX GPU
+pip install -r worker/requirements.txt -r worker/requirements-onnx-gpu.txt
+```
+
+The native Android APK bundles LiteRT. If a device successfully exposes a Vulkan compute queue, the APK additionally advertises `vulkan` and the fixed `vulkan_vector_add` GPU task.
+
 ## Rust worker
 
 ```bash
@@ -86,17 +115,16 @@ The Rust worker is intended for PCs, servers, Raspberry Pis, and other devices w
 
 Open `android-worker/` in Android Studio and build the app. Enter the controller URL and enrollment token, then tap **Join swarm**. It runs as a foreground service with battery/temperature-aware pausing.
 
-The Android task registry is in:
+The Android worker includes:
 
-```text
-android-worker/app/src/main/java/com/camalabs/computeswarm/TaskRegistry.kt
-```
+- `litert_infer` — local LiteRT FLOAT32 inference from a model artifact.
+- `vulkan_vector_add` — a real NDK Vulkan compute dispatch using a locally bundled shader; advertised only on compatible devices.
 
-That is the extension point for Kotlin, NDK/C++, Vulkan Compute, TFLite, or other locally installed Android kernels.
+The controller cannot replace the model runtime code or Vulkan shader.
 
 ## Creating jobs
 
-A normal job is JSON. The worker must advertise `task:<kind>` plus every requirement:
+A normal job is JSON. The worker must advertise `task:<kind>` plus every explicit requirement:
 
 ```bash
 curl -X POST http://127.0.0.1:8765/jobs \
@@ -131,8 +159,6 @@ curl -X POST http://127.0.0.1:8765/jobs/range \
 
 Large inputs are uploaded once and referenced by SHA-256 artifact ID instead of being embedded in job JSON.
 
-Upload an input:
-
 ```bash
 curl -X POST 'http://127.0.0.1:8765/artifacts?name=input.bin' \
   -H "Authorization: Bearer $SWARM_ADMIN_TOKEN" \
@@ -140,77 +166,72 @@ curl -X POST 'http://127.0.0.1:8765/artifacts?name=input.bin' \
   --data-binary @input.bin
 ```
 
-The response's `artifact_id` can be used in a work-unit payload:
+The response's `artifact_id` can then be referenced in a work-unit payload:
 
 ```json
 {
-  "alias":"input",
   "artifact_inputs":[
-    {
-      "artifact_id":"<sha256>",
-      "alias":"input",
-      "name":"input.bin"
-    }
+    {"artifact_id":"<sha256>", "alias":"input", "name":"input.bin"}
   ]
 }
 ```
 
-The Python, Rust, and Android workers download the file into an isolated per-unit work directory and verify its SHA-256 checksum before the task runs.
+Workers download inputs into an isolated per-unit work directory and verify SHA-256 before execution. Trusted local tasks can declare sandbox files as outputs; the agent uploads them back to the controller.
 
-Trusted local tasks can declare files created inside that sandbox as outputs; the agent uploads them to the controller and returns artifact metadata in the work-unit result.
+Worker artifact reads are lease-scoped: possession of a device token alone does not grant access to arbitrary stored artifacts.
 
-See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the complete wire and artifact contract.
+See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the wire and artifact contract.
 
 ## Capability scheduling
 
-Examples of worker-advertised capabilities:
+Examples:
 
 ```text
 cpu
-rust
 python
+rust
 kotlin
 cuda
-vulkan
+cuda:cupy
+onnx
+onnx:cuda
+litert
 tflite
+vulkan
 os:linux
 os:android
 arch:x86_64
 arch:aarch64
-task:prime_count
-task:model_infer
+task:cuda_matmul_npy
+task:onnx_infer
+task:litert_infer
+task:vulkan_vector_add
 ```
 
-A job may additionally constrain:
+A job may additionally constrain OS, architecture, minimum CPU cores/RAM, and arbitrary exact-match labels such as site or rack.
 
-- operating system
-- architecture
-- minimum CPU cores
-- minimum RAM
-- arbitrary labels such as site/rack/owner
+## Included task implementations
 
-This lets one controller coordinate a mixed swarm without assuming all nodes have the same hardware.
-
-## Built-in demonstration tasks
-
-All current workers implement:
+Baseline tasks:
 
 - `prime_count`
 - `monte_carlo_pi`
 - `sha256_artifact`
 - `text_artifact`
 
-The demos are deliberately simple. Real workloads should be added as locally installed task handlers/plugins.
+Optional/native accelerator tasks:
 
-## Tests
+- `cuda_vector_add`
+- `cuda_matmul_npy`
+- `onnx_infer`
+- `litert_infer`
+- `vulkan_vector_add`
+
+## Tests and builds
 
 ```bash
 pip install -r coordinator/requirements.txt -r worker/requirements.txt pytest httpx
 pytest -q
 ```
 
-GitHub Actions runs the Python test suite, `cargo check` for the Rust worker, and a debug APK build for the native Android worker.
-
-## Next extensions
-
-The protocol is intentionally compatible with future workers written in other languages. Logical next backends include CUDA, Vulkan Compute, ONNX Runtime, TFLite, and object-storage-backed artifacts.
+GitHub Actions runs the Python tests, `cargo check` for the Rust worker, and a full Android debug APK build including NDK C++, shader compilation, and LiteRT dependency resolution. A successful Android job uploads `app-debug.apk` as a workflow artifact.
