@@ -11,22 +11,28 @@ from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 DB_PATH = Path(os.getenv("SWARM_DB", Path(__file__).with_name("swarm.db")))
+ARTIFACT_DIR = Path(os.getenv("SWARM_ARTIFACT_DIR", Path(__file__).with_name("artifacts")))
 ADMIN_TOKEN = os.getenv("SWARM_ADMIN_TOKEN", "dev-admin-token-change-me")
 ENROLLMENT_TOKEN = os.getenv("SWARM_ENROLLMENT_TOKEN", "dev-enroll-token-change-me")
 LEASE_SECONDS = int(os.getenv("SWARM_LEASE_SECONDS", "120"))
 MAX_LONG_POLL_SECONDS = int(os.getenv("SWARM_MAX_LONG_POLL_SECONDS", "20"))
+MAX_ARTIFACT_BYTES = int(os.getenv("SWARM_MAX_ARTIFACT_BYTES", str(2 * 1024 * 1024 * 1024)))
+UPLOAD_CHUNK_BYTES = 1024 * 1024
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     yield
 
 
-app = FastAPI(title="Universal Compute Swarm Controller", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Universal Compute Swarm Controller", version="0.3.0", lifespan=lifespan)
 
 
 def _json(value: Any) -> str:
@@ -59,6 +65,7 @@ def db():
 
 def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     with db() as conn:
         conn.executescript(
             """
@@ -111,9 +118,22 @@ def init_db() -> None:
                 FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS artifacts (
+                id TEXT PRIMARY KEY,
+                sha256 TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                storage_path TEXT NOT NULL,
+                uploader_type TEXT NOT NULL,
+                uploader_id TEXT,
+                created_at REAL NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_work_units_sched
                 ON work_units(status, lease_until, job_id, sequence);
             CREATE INDEX IF NOT EXISTS idx_workers_seen ON workers(last_seen);
+            CREATE INDEX IF NOT EXISTS idx_artifacts_created ON artifacts(created_at);
             """
         )
 
@@ -139,6 +159,44 @@ def verify_worker(worker_id: str, authorization: str | None) -> sqlite3.Row:
     if not row["enabled"]:
         raise HTTPException(status_code=403, detail="worker disabled")
     return row
+
+
+def _payload_references_artifact(value: Any, artifact_id: str) -> bool:
+    if isinstance(value, dict):
+        if str(value.get("artifact_id", "")) == artifact_id:
+            return True
+        return any(_payload_references_artifact(v, artifact_id) for v in value.values())
+    if isinstance(value, list):
+        return any(_payload_references_artifact(v, artifact_id) for v in value)
+    return False
+
+
+def _worker_can_download_artifact(worker_id: str, artifact_id: str) -> bool:
+    now = time.time()
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT payload_json FROM work_units
+            WHERE worker_id=? AND status='leased' AND lease_until>=?
+            """,
+            (worker_id, now),
+        ).fetchall()
+    return any(_payload_references_artifact(_loads(row["payload_json"], {}), artifact_id) for row in rows)
+
+
+def artifact_auth(
+    authorization: str | None,
+    worker_id: str | None,
+    artifact_id: str,
+) -> tuple[str, str | None]:
+    if authorization == f"Bearer {ADMIN_TOKEN}":
+        return "admin", None
+    if worker_id:
+        verify_worker(worker_id, authorization)
+        if not _worker_can_download_artifact(worker_id, artifact_id):
+            raise HTTPException(status_code=403, detail="artifact is not referenced by an active worker lease")
+        return "worker", worker_id
+    raise HTTPException(status_code=401, detail="artifact access requires admin or worker credentials")
 
 
 class WorkerEnroll(BaseModel):
@@ -287,6 +345,95 @@ def _try_lease(worker_id: str) -> dict[str, Any] | None:
             "kind": row["kind"],
             "payload": _loads(row["payload_json"], {}),
         }
+
+
+def _artifact_path(sha256_hex: str) -> Path:
+    return ARTIFACT_DIR / sha256_hex[:2] / sha256_hex
+
+
+def _artifact_public(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "artifact_id": row["id"],
+        "sha256": row["sha256"],
+        "name": row["name"],
+        "content_type": row["content_type"],
+        "size_bytes": row["size_bytes"],
+        "created_at": row["created_at"],
+    }
+
+
+async def _store_artifact(
+    request: Request,
+    *,
+    name: str,
+    uploader_type: str,
+    uploader_id: str | None,
+    expected_sha256: str | None,
+) -> dict[str, Any]:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_ARTIFACT_BYTES:
+                raise HTTPException(status_code=413, detail="artifact too large")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid content-length")
+
+    clean_name = Path(name).name or "artifact.bin"
+    content_type = request.headers.get("content-type", "application/octet-stream")
+    temp_dir = ARTIFACT_DIR / ".uploads"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = temp_dir / f"{uuid.uuid4()}.part"
+    hasher = hashlib.sha256()
+    size = 0
+
+    try:
+        with temp_path.open("wb") as out:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                size += len(chunk)
+                if size > MAX_ARTIFACT_BYTES:
+                    raise HTTPException(status_code=413, detail="artifact too large")
+                hasher.update(chunk)
+                out.write(chunk)
+        digest = hasher.hexdigest()
+        if expected_sha256 and not secrets.compare_digest(digest.lower(), expected_sha256.lower()):
+            raise HTTPException(status_code=422, detail="sha256 mismatch")
+
+        final_path = _artifact_path(digest)
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        if not final_path.exists():
+            temp_path.replace(final_path)
+        else:
+            temp_path.unlink(missing_ok=True)
+
+        with db() as conn:
+            existing = conn.execute("SELECT * FROM artifacts WHERE sha256=?", (digest,)).fetchone()
+            if existing is None:
+                artifact_id = digest
+                conn.execute(
+                    """
+                    INSERT INTO artifacts(
+                        id,sha256,name,content_type,size_bytes,storage_path,uploader_type,uploader_id,created_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        artifact_id,
+                        digest,
+                        clean_name,
+                        content_type,
+                        size,
+                        str(final_path),
+                        uploader_type,
+                        uploader_id,
+                        time.time(),
+                    ),
+                )
+                existing = conn.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
+        assert existing is not None
+        return _artifact_public(existing)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 @app.get("/health")
@@ -508,16 +655,92 @@ def submit_failure(
     return {"ok": True}
 
 
+@app.post("/artifacts", dependencies=[Depends(admin_auth)])
+async def upload_admin_artifact(
+    request: Request,
+    name: str = Query(default="artifact.bin", min_length=1, max_length=255),
+    x_artifact_sha256: str | None = Header(default=None),
+):
+    return await _store_artifact(
+        request,
+        name=name,
+        uploader_type="admin",
+        uploader_id=None,
+        expected_sha256=x_artifact_sha256,
+    )
+
+
+@app.post("/workers/{worker_id}/artifacts")
+async def upload_worker_artifact(
+    worker_id: str,
+    request: Request,
+    name: str = Query(default="artifact.bin", min_length=1, max_length=255),
+    authorization: str | None = Header(default=None),
+    x_artifact_sha256: str | None = Header(default=None),
+):
+    verify_worker(worker_id, authorization)
+    return await _store_artifact(
+        request,
+        name=name,
+        uploader_type="worker",
+        uploader_id=worker_id,
+        expected_sha256=x_artifact_sha256,
+    )
+
+
+@app.get("/artifacts/{artifact_id}")
+def download_artifact(
+    artifact_id: str,
+    authorization: str | None = Header(default=None),
+    x_worker_id: str | None = Header(default=None),
+):
+    artifact_auth(authorization, x_worker_id, artifact_id)
+    with db() as conn:
+        row = conn.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "artifact not found")
+    path = Path(row["storage_path"])
+    if not path.exists():
+        raise HTTPException(410, "artifact content missing")
+    return FileResponse(
+        path,
+        media_type=row["content_type"],
+        filename=row["name"],
+        headers={
+            "X-Artifact-Id": row["id"],
+            "X-Artifact-Sha256": row["sha256"],
+            "X-Artifact-Size": str(row["size_bytes"]),
+        },
+    )
+
+
+@app.get("/artifacts/{artifact_id}/meta")
+def artifact_meta(
+    artifact_id: str,
+    authorization: str | None = Header(default=None),
+    x_worker_id: str | None = Header(default=None),
+):
+    artifact_auth(authorization, x_worker_id, artifact_id)
+    with db() as conn:
+        row = conn.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "artifact not found")
+    return _artifact_public(row)
+
+
 @app.get("/jobs/{job_id}", dependencies=[Depends(admin_auth)])
 def get_job(job_id: str):
     with db() as conn:
         job = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         if job is None:
             raise HTTPException(404, "job not found")
-        units = [dict(r) for r in conn.execute(
-            "SELECT id,sequence,status,worker_id,elapsed_ms,error,attempts,result_json FROM work_units WHERE job_id=? ORDER BY sequence",
-            (job_id,),
-        )]
+        units = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id,sequence,status,worker_id,elapsed_ms,error,attempts,result_json FROM work_units WHERE job_id=? ORDER BY sequence",
+                (job_id,),
+            )
+        ]
     for unit in units:
         unit["result"] = _loads(unit.pop("result_json"), None)
     result = dict(job)
@@ -531,24 +754,38 @@ def get_job(job_id: str):
 def status():
     now = time.time()
     with db() as conn:
-        workers = [dict(r) for r in conn.execute(
-            "SELECT id,name,os_name,platform,arch,cores,memory_mb,benchmark,capabilities_json,labels_json,agent_version,temperature_c,battery_pct,charging,enabled,last_seen FROM workers ORDER BY name"
-        )]
-        jobs = [dict(r) for r in conn.execute(
-            """
-            SELECT j.id,j.kind,j.priority,j.created_at,
-                   COUNT(u.id) units,
-                   SUM(CASE WHEN u.status='done' THEN 1 ELSE 0 END) done,
-                   SUM(CASE WHEN u.status='leased' THEN 1 ELSE 0 END) leased,
-                   SUM(CASE WHEN u.status='failed' THEN 1 ELSE 0 END) failed
-            FROM jobs j LEFT JOIN work_units u ON u.job_id=j.id
-            GROUP BY j.id ORDER BY j.created_at DESC
-            """
-        )]
+        workers = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id,name,os_name,platform,arch,cores,memory_mb,benchmark,capabilities_json,labels_json,agent_version,temperature_c,battery_pct,charging,enabled,last_seen FROM workers ORDER BY name"
+            )
+        ]
+        jobs = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT j.id,j.kind,j.priority,j.created_at,
+                       COUNT(u.id) units,
+                       SUM(CASE WHEN u.status='done' THEN 1 ELSE 0 END) done,
+                       SUM(CASE WHEN u.status='leased' THEN 1 ELSE 0 END) leased,
+                       SUM(CASE WHEN u.status='failed' THEN 1 ELSE 0 END) failed
+                FROM jobs j LEFT JOIN work_units u ON u.job_id=j.id
+                GROUP BY j.id ORDER BY j.created_at DESC
+                """
+            )
+        ]
+        artifact_stats = conn.execute(
+            "SELECT COUNT(*) count, COALESCE(SUM(size_bytes),0) bytes FROM artifacts"
+        ).fetchone()
     for worker in workers:
         worker["capabilities"] = _loads(worker.pop("capabilities_json"), [])
         worker["labels"] = _loads(worker.pop("labels_json"), {})
         worker["online"] = now - worker["last_seen"] < max(30, LEASE_SECONDS)
         if worker["charging"] is not None:
             worker["charging"] = bool(worker["charging"])
-    return {"workers": workers, "jobs": jobs, "lease_seconds": LEASE_SECONDS}
+    return {
+        "workers": workers,
+        "jobs": jobs,
+        "artifacts": {"count": artifact_stats["count"], "bytes": artifact_stats["bytes"]},
+        "lease_seconds": LEASE_SECONDS,
+    }
