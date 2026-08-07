@@ -7,3 +7,4 @@ __pycache__/
 *.db-wal
 .compute-swarm-identity.json
 .env
+android-worker/.signing/
