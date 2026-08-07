@@ -2,9 +2,16 @@ name: CI
 
 on:
   push:
+  schedule:
+    - cron: "17 4 */5 * *"
+
+permissions:
+  actions: read
+  contents: read
 
 jobs:
   python:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,6 +22,7 @@ jobs:
       - run: pytest -q
 
   onnx-worker:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +33,7 @@ jobs:
       - run: pytest -q tests/test_onnx_accelerator.py
 
   rust-worker:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,9 +41,11 @@ jobs:
       - run: cargo check --manifest-path rust-worker/Cargo.toml
 
   android-worker:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
       SWARM_SIGNING_KEYSTORE: ${{ github.workspace }}/android-worker/.signing/debug.keystore
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v5
@@ -43,39 +54,60 @@ jobs:
           java-version: "17"
       - uses: android-actions/setup-android@v3
       - run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;29.0.14206865" "cmake;3.22.1"
-      - name: Restore stable debug signing key
+      - name: Restore canonical 0.5 signing key
+        id: signing-cache
         uses: actions/cache@v4
         with:
           path: android-worker/.signing/debug.keystore
-          key: compute-swarm-android-debug-signing-v2
-      - name: Create signing key on first build
+          key: compute-swarm-signing-958a2b10-v1
+      - name: Bootstrap canonical key from private Actions backup
+        if: steps.signing-cache.outputs.cache-hit != 'true'
         run: |
-          mkdir -p android-worker/.signing
-          if [ ! -f "$SWARM_SIGNING_KEYSTORE" ]; then
-            keytool -genkeypair -noprompt \
-              -keystore "$SWARM_SIGNING_KEYSTORE" \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -dname "CN=Compute Swarm Debug,O=CaMaLabs,C=US" \
-              -keyalg RSA -keysize 2048 -validity 10000
-          fi
+          mkdir -p android-worker/.signing /tmp/swarm-signing
+          curl --fail --location \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/${{ github.repository }}/actions/artifacts/9006028775/zip \
+            -o /tmp/swarm-signing/signing.zip
+          unzip -o /tmp/swarm-signing/signing.zip -d android-worker/.signing
+          test -f "$SWARM_SIGNING_KEYSTORE"
+      - name: Verify canonical signing certificate
+        run: |
+          ACTUAL=$(keytool -list -v -keystore "$SWARM_SIGNING_KEYSTORE" -storepass android -alias androiddebugkey \
+            | awk -F': ' '/SHA256:/{gsub(":", "", $2); print tolower($2); exit}')
+          EXPECTED=958a2b1005e336510c9f4eaa06ef0bd0bf1c38a31901ba17ed8fee6bc2cfe692
+          echo "Signing SHA-256: $ACTUAL"
+          test "$ACTUAL" = "$EXPECTED"
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.13"
       - working-directory: android-worker
         run: gradle :app:assembleDebug
-      - name: Show APK signing certificate
-        run: "$ANDROID_HOME/build-tools/35.0.0/apksigner verify --print-certs android-worker/app/build/outputs/apk/debug/app-debug.apk"
+      - name: Verify APK signing certificate
+        run: |
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs android-worker/app/build/outputs/apk/debug/app-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs android-worker/app/build/outputs/apk/debug/app-debug.apk \
+            | grep -qi '958a2b1005e336510c9f4eaa06ef0bd0bf1c38a31901ba17ed8fee6bc2cfe692'
       - uses: actions/upload-artifact@v4
         with:
           name: compute-swarm-android-debug
           path: android-worker/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-      - name: Private signing-key backup
+      - name: Private recovery backup
         uses: actions/upload-artifact@v4
         with:
           name: compute-swarm-signing-backup
           path: android-worker/.signing/debug.keystore
-          retention-days: 7
+          retention-days: 90
           if-no-files-found: error
+
+  signing-key-keepalive:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Keep canonical signing cache active
+        uses: actions/cache@v4
+        with:
+          path: android-worker/.signing/debug.keystore
+          key: compute-swarm-signing-958a2b10-v1
+          fail-on-cache-miss: true
