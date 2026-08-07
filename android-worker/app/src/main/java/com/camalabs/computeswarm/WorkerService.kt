@@ -32,7 +32,7 @@ class WorkerService : Service() {
         const val ACTION_STOP = "com.camalabs.computeswarm.STOP"
         private const val CHANNEL_ID = "compute-swarm-worker"
         private const val NOTIFICATION_ID = 42
-        private const val AGENT_VERSION = "0.3.0-android"
+        private const val AGENT_VERSION = "0.4.0-android"
     }
 
     private val running = AtomicBoolean(false)
@@ -213,8 +213,9 @@ class WorkerService : Service() {
 
     private fun capabilities(): JSONArray {
         val values = mutableListOf("cpu", "kotlin", "os:android", "arch:${Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown"}")
+        values += TaskRegistry.extraCapabilities
         values += TaskRegistry.taskNames.map { "task:$it" }
-        return JSONArray(values.sorted())
+        return JSONArray(values.distinct().sorted())
     }
 
     private fun register(controller: String, identity: Identity, score: Double): Int {
@@ -299,7 +300,7 @@ class WorkerService : Service() {
             val pathJson = JSONObject()
             artifactPaths.forEach { (key, value) -> pathJson.put(key, value.absolutePath) }
             payload.put("_work_dir", root.absolutePath).put("_artifact_paths", pathJson)
-            val context = TaskRegistry.Context(root, artifactPaths)
+            val context = TaskRegistry.ContextData(applicationContext, root, artifactPaths)
             val result = TaskRegistry.execute(work.getString("kind"), payload, context)
             return normalizeOutputs(controller, identity, root, result)
         } finally {
