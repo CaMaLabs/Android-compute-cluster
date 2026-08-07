@@ -24,7 +24,21 @@ if ! id "$SERVICE_USER" >/dev/null 2>&1; then
   useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
 
-if [[ -d "$APP_DIR/.git" ]]; then
+# Stop the old process before replacing/updating its checkout.
+systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+
+# If the caller supplied an authenticated local checkout (recommended for a
+# private repo), copy it directly. This avoids root Git credential and
+# safe.directory problems during upgrades.
+if [[ -d "$REPO_URL/.git" ]]; then
+  SOURCE_DIR="$(cd "$REPO_URL" && pwd)"
+  if [[ "$SOURCE_DIR" != "$APP_DIR" ]]; then
+    rm -rf "$APP_DIR"
+    mkdir -p "$(dirname "$APP_DIR")"
+    cp -a "$SOURCE_DIR" "$APP_DIR"
+  fi
+elif [[ -d "$APP_DIR/.git" ]]; then
+  git config --global --add safe.directory "$APP_DIR" || true
   git -C "$APP_DIR" fetch origin "$REPO_BRANCH"
   git -C "$APP_DIR" checkout "$REPO_BRANCH"
   git -C "$APP_DIR" reset --hard "origin/$REPO_BRANCH"
@@ -81,18 +95,17 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now "$SERVICE_NAME"
-systemctl restart "$SERVICE_NAME"
 
-sleep 1
-if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-  echo "Controller failed to start. Recent logs:" >&2
-  journalctl -u "$SERVICE_NAME" -n 50 --no-pager >&2
-  exit 1
-fi
+for _ in {1..20}; do
+  if curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.5
+done
 
-if ! curl --fail --silent --show-error "http://127.0.0.1:$PORT/health" >/dev/null; then
-  echo "Controller service is active but the local health check failed." >&2
-  journalctl -u "$SERVICE_NAME" -n 50 --no-pager >&2
+if ! systemctl is-active --quiet "$SERVICE_NAME" || ! curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null; then
+  echo "Controller failed its local health check. Recent logs:" >&2
+  journalctl -u "$SERVICE_NAME" -n 80 --no-pager >&2
   exit 1
 fi
 
@@ -107,7 +120,8 @@ Compute Swarm controller installed successfully.
 Service:        $SERVICE_NAME
 Dashboard:      http://${IP_ADDR:-127.0.0.1}:$PORT/
 API docs:       http://${IP_ADDR:-127.0.0.1}:$PORT/docs
-Local health:   http://127.0.0.1:$PORT/health
+Health:         http://${IP_ADDR:-127.0.0.1}:$PORT/health
+Local URL:      http://127.0.0.1:$PORT
 
 Android enrollment token:
 $ENROLLMENT_TOKEN
@@ -120,9 +134,6 @@ Useful commands:
   sudo journalctl -u $SERVICE_NAME -f
   sudo systemctl restart $SERVICE_NAME
   sudo cat $ENV_FILE
-
-If another device cannot reach the dashboard and UFW is active, allow the LAN port with:
-  sudo ufw allow $PORT/tcp
 
 For access across the public Internet, put the controller behind HTTPS rather than exposing plain HTTP directly.
 EOF
