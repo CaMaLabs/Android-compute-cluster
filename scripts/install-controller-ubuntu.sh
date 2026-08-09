@@ -6,10 +6,14 @@ SERVICE_USER="${SWARM_SERVICE_USER:-compute-swarm}"
 SERVICE_NAME="${SWARM_SERVICE_NAME:-compute-swarm-controller}"
 ENV_DIR="/etc/compute-swarm"
 ENV_FILE="$ENV_DIR/controller.env"
+UPDATE_ENV_FILE="$ENV_DIR/controller-update.env"
 DATA_DIR="${SWARM_DATA_DIR:-/var/lib/compute-swarm}"
 PORT="${SWARM_PORT:-8765}"
 REPO_URL="${SWARM_REPO_URL:-https://github.com/CaMaLabs/Android-compute-cluster.git}"
-REPO_BRANCH="${SWARM_REPO_BRANCH:-agent/universal-compute-swarm}"
+REPO_BRANCH="${SWARM_REPO_BRANCH:-main}"
+AUTO_UPDATE="${SWARM_AUTO_UPDATE:-1}"
+UPDATE_INTERVAL_MINUTES="${SWARM_UPDATE_INTERVAL_MINUTES:-15}"
+UPDATE_SERVICE="${SERVICE_NAME}-update"
 
 if [[ $EUID -ne 0 ]]; then
   echo "Run this installer with sudo/root." >&2
@@ -18,7 +22,7 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y git python3 python3-venv python3-pip curl ca-certificates openssl
+apt-get install -y git python3 python3-venv python3-pip curl ca-certificates openssl util-linux
 
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
   useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
@@ -89,8 +93,52 @@ ReadWritePaths=$DATA_DIR
 WantedBy=multi-user.target
 SERVICEEOF
 
+cat > "$UPDATE_ENV_FILE" <<UPDATEEOF
+SWARM_UPDATE_REPO_DIR=$APP_DIR
+SWARM_UPDATE_BRANCH=$REPO_BRANCH
+SWARM_UPDATE_GIT_USER=$SERVICE_USER
+SWARM_UPDATE_PYTHON=$APP_DIR/.venv/bin/python
+SWARM_UPDATE_REQUIREMENTS=coordinator/requirements.txt
+SWARM_UPDATE_SERVICE=$SERVICE_NAME
+SWARM_UPDATE_HEALTH_URL=http://127.0.0.1:$PORT/health
+SWARM_UPDATE_STATE_FILE=$DATA_DIR/controller-update-state
+UPDATEEOF
+chmod 600 "$UPDATE_ENV_FILE"
+
+cat > "/etc/systemd/system/${UPDATE_SERVICE}.service" <<UPDATEUNIT
+[Unit]
+Description=Compute Swarm Controller Automatic Update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=$UPDATE_ENV_FILE
+ExecStart=/bin/bash $APP_DIR/scripts/auto-update-linux.sh
+UPDATEUNIT
+
+cat > "/etc/systemd/system/${UPDATE_SERVICE}.timer" <<TIMERUNIT
+[Unit]
+Description=Check Compute Swarm Controller for updates
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=${UPDATE_INTERVAL_MINUTES}min
+RandomizedDelaySec=2min
+Persistent=true
+Unit=${UPDATE_SERVICE}.service
+
+[Install]
+WantedBy=timers.target
+TIMERUNIT
+
 systemctl daemon-reload
 systemctl enable --now "$SERVICE_NAME"
+if [[ "$AUTO_UPDATE" == "1" ]]; then
+  systemctl enable --now "${UPDATE_SERVICE}.timer"
+else
+  systemctl disable --now "${UPDATE_SERVICE}.timer" >/dev/null 2>&1 || true
+fi
 
 for _ in {1..20}; do
   if curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 \
@@ -121,7 +169,10 @@ Dashboard:      http://${IP_ADDR:-127.0.0.1}:$PORT/
 API docs:       http://${IP_ADDR:-127.0.0.1}:$PORT/docs
 Health:         http://${IP_ADDR:-127.0.0.1}:$PORT/health
 Experiments:    http://${IP_ADDR:-127.0.0.1}:$PORT/experiments
+Pokemon CABT:   http://${IP_ADDR:-127.0.0.1}:$PORT/pokemon
 Local URL:      http://127.0.0.1:$PORT
+Auto updates:   $([[ "$AUTO_UPDATE" == "1" ]] && echo "enabled every ~${UPDATE_INTERVAL_MINUTES} minutes" || echo disabled)
+Update state:   $DATA_DIR/controller-update-state
 
 Android enrollment token:
 $ENROLLMENT_TOKEN
@@ -133,6 +184,9 @@ Useful commands:
   sudo systemctl status $SERVICE_NAME
   sudo journalctl -u $SERVICE_NAME -f
   sudo systemctl restart $SERVICE_NAME
+  sudo systemctl start ${UPDATE_SERVICE}.service
+  sudo systemctl list-timers ${UPDATE_SERVICE}.timer
+  sudo cat $DATA_DIR/controller-update-state
   sudo cat $ENV_FILE
 
 For access across the public Internet, put the controller behind HTTPS rather than exposing plain HTTP directly.
