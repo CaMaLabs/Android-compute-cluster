@@ -178,6 +178,7 @@ Dashboard:      http://${IP_ADDR:-127.0.0.1}:$PORT/
 API docs:       http://${IP_ADDR:-127.0.0.1}:$PORT/docs
 Health:         http://${IP_ADDR:-127.0.0.1}:$PORT/health
 Experiments:    http://${IP_ADDR:-127.0.0.1}:$PORT/experiments
+Ollama:         http://${IP_ADDR:-127.0.0.1}:$PORT/ollama
 Pokemon CABT:   http://${IP_ADDR:-127.0.0.1}:$PORT/pokemon
 Local URL:      http://127.0.0.1:$PORT
 Update remote:  $UPDATE_REMOTE_URL
