@@ -24,12 +24,8 @@ if ! id "$SERVICE_USER" >/dev/null 2>&1; then
   useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
 
-# Stop the old process before replacing/updating its checkout.
 systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
 
-# If the caller supplied an authenticated local checkout (recommended for a
-# private repo), copy it directly. This avoids root Git credential and
-# safe.directory problems during upgrades.
 if [[ -d "$REPO_URL/.git" ]]; then
   SOURCE_DIR="$(cd "$REPO_URL" && pwd)"
   if [[ "$SOURCE_DIR" != "$APP_DIR" ]]; then
@@ -57,18 +53,18 @@ chmod 700 "$ENV_DIR"
 if [[ ! -f "$ENV_FILE" ]]; then
   ADMIN_TOKEN="$(openssl rand -hex 32)"
   ENROLLMENT_TOKEN="$(openssl rand -hex 32)"
-  cat > "$ENV_FILE" <<EOF
+  cat > "$ENV_FILE" <<ENVEOF
 SWARM_ADMIN_TOKEN=$ADMIN_TOKEN
 SWARM_ENROLLMENT_TOKEN=$ENROLLMENT_TOKEN
 SWARM_DB=$DATA_DIR/swarm.db
 SWARM_ARTIFACT_DIR=$DATA_DIR/artifacts
-EOF
+ENVEOF
   chmod 600 "$ENV_FILE"
 fi
 
 chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR" "$DATA_DIR"
 
-cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
+cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<SERVICEEOF
 [Unit]
 Description=Compute Swarm Controller
 After=network-online.target
@@ -80,7 +76,7 @@ User=$SERVICE_USER
 Group=$SERVICE_USER
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$ENV_FILE
-ExecStart=$APP_DIR/.venv/bin/uvicorn --app-dir $APP_DIR/coordinator web:app --host 0.0.0.0 --port $PORT
+ExecStart=$APP_DIR/.venv/bin/uvicorn --app-dir $APP_DIR/coordinator server:app --host 0.0.0.0 --port $PORT
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -91,20 +87,23 @@ ReadWritePaths=$DATA_DIR
 
 [Install]
 WantedBy=multi-user.target
-EOF
+SERVICEEOF
 
 systemctl daemon-reload
 systemctl enable --now "$SERVICE_NAME"
 
 for _ in {1..20}; do
-  if curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+  if curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 \
+     && curl -fsS "http://127.0.0.1:$PORT/" >/dev/null 2>&1; then
     break
   fi
   sleep 0.5
 done
 
-if ! systemctl is-active --quiet "$SERVICE_NAME" || ! curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null; then
-  echo "Controller failed its local health check. Recent logs:" >&2
+if ! systemctl is-active --quiet "$SERVICE_NAME" \
+   || ! curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null \
+   || ! curl -fsS "http://127.0.0.1:$PORT/" >/dev/null; then
+  echo "Controller failed its API/dashboard health check. Recent logs:" >&2
   journalctl -u "$SERVICE_NAME" -n 80 --no-pager >&2
   exit 1
 fi
@@ -113,7 +112,7 @@ IP_ADDR="$(hostname -I 2>/dev/null | awk '{print $1}')"
 ENROLLMENT_TOKEN="$(grep '^SWARM_ENROLLMENT_TOKEN=' "$ENV_FILE" | cut -d= -f2-)"
 ADMIN_TOKEN="$(grep '^SWARM_ADMIN_TOKEN=' "$ENV_FILE" | cut -d= -f2-)"
 
-cat <<EOF
+cat <<OUTEOF
 
 Compute Swarm controller installed successfully.
 
@@ -121,6 +120,7 @@ Service:        $SERVICE_NAME
 Dashboard:      http://${IP_ADDR:-127.0.0.1}:$PORT/
 API docs:       http://${IP_ADDR:-127.0.0.1}:$PORT/docs
 Health:         http://${IP_ADDR:-127.0.0.1}:$PORT/health
+Experiments:    http://${IP_ADDR:-127.0.0.1}:$PORT/experiments
 Local URL:      http://127.0.0.1:$PORT
 
 Android enrollment token:
@@ -136,4 +136,4 @@ Useful commands:
   sudo cat $ENV_FILE
 
 For access across the public Internet, put the controller behind HTTPS rather than exposing plain HTTP directly.
-EOF
+OUTEOF
