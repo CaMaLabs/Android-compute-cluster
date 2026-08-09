@@ -20,6 +20,13 @@ jobs:
           python-version: "3.12"
       - run: pip install -r coordinator/requirements.txt -r worker/requirements.txt pytest httpx
       - run: pytest -q
+      - name: Validate Linux scripts
+        run: bash -n scripts/*.sh
+      - name: Validate Windows scripts
+        shell: pwsh
+        run: |
+          [void][scriptblock]::Create((Get-Content -Raw scripts/install-windows.ps1))
+          [void][scriptblock]::Create((Get-Content -Raw scripts/auto-update-windows.ps1))
 
   onnx-worker:
     if: github.event_name != 'schedule'
