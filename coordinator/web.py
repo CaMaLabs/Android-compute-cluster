@@ -79,13 +79,14 @@ DASHBOARD_HTML = r'''<!doctype html>
 <script>
 const $=id=>document.getElementById(id); let timer=null;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const tokenHeaders=()=>({Authorization:'Bearer '+$('token').value.trim()});
+const cleanToken=()=>$('token').value.replace(/[^a-fA-F0-9]/g,'').trim();
+const tokenHeaders=()=>({Authorization:'Bearer '+cleanToken()});
 function bytes(n){if(!n)return '0 B';let u=['B','KB','MB','GB','TB'],i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(i?1:0)+' '+u[i]}
 function age(ts){if(!ts)return '—';let s=Math.max(0,Date.now()/1000-ts);if(s<60)return Math.round(s)+'s ago';if(s<3600)return Math.round(s/60)+'m ago';return Math.round(s/3600)+'h ago'}
 function objectiveLabel(o){return o?`${esc(o.direction)} · ${esc(o.path)}`:'—'}
 async function jsonFetch(path,options={}){const r=await fetch(path,options);let d=null;try{d=await r.json()}catch(_){ }if(!r.ok)throw new Error(d?.detail||`HTTP ${r.status}`);return d}
 async function refresh(){
- const token=$('token').value.trim(); if(!token)return;
+ const token=cleanToken(); $('token').value=token; if(!token)return;
  try{
   const [d,e]=await Promise.all([
     jsonFetch('/status',{headers:tokenHeaders()}),
@@ -109,7 +110,7 @@ $('toggleCreate').onclick=()=>{$('createPanel').classList.toggle('hidden')};$('c
 $('submitExperiment').onclick=async()=>{const out=$('createMessage');out.className='';out.textContent='';try{const spec=JSON.parse($('experimentSpec').value);$('submitExperiment').disabled=true;const d=await jsonFetch('/experiments',{method:'POST',headers:{...tokenHeaders(),'Content-Type':'application/json'},body:JSON.stringify(spec)});out.className='success';out.textContent=`Launched ${d.units} work units · experiment ${d.experiment_id}`;await refresh()}catch(e){out.className='error';out.textContent=e.message}finally{$('submitExperiment').disabled=false}};
 $('connect').onclick=()=>{refresh();if(timer)clearInterval(timer);timer=setInterval(refresh,3000)};
 $('token').addEventListener('keydown',e=>{if(e.key==='Enter')$('connect').click()});
-const saved=localStorage.getItem('swarmAdminToken');if(saved){$('token').value=saved;$('connect').click()}
+const saved=(localStorage.getItem('swarmAdminToken')||'').replace(/[^a-fA-F0-9]/g,'');if(saved){$('token').value=saved;localStorage.setItem('swarmAdminToken',saved);$('connect').click()}
 </script>
 </body></html>'''
 
