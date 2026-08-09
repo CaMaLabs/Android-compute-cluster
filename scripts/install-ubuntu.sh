@@ -12,7 +12,7 @@ Options:
   --user USER          Service user (defaults to invoking sudo user/current user)
   --onnx cpu|gpu|none  Optional ONNX Runtime backend (default: none)
   --cuda 12|13|none    Optional CuPy CUDA backend (default: none)
-  --branch NAME        Git branch to install (default: agent/universal-compute-swarm)
+  --branch NAME        Git branch to install (default: main)
 EOF
 }
 
@@ -21,8 +21,10 @@ TOKEN=""
 TARGET_USER="${SUDO_USER:-$USER}"
 ONNX="none"
 CUDA="none"
-BRANCH="agent/universal-compute-swarm"
+BRANCH="main"
 REPO_URL="https://github.com/CaMaLabs/Android-compute-cluster.git"
+AUTO_UPDATE="${SWARM_AUTO_UPDATE:-1}"
+UPDATE_INTERVAL_MINUTES="${SWARM_UPDATE_INTERVAL_MINUTES:-15}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -46,7 +48,7 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y git python3 python3-venv python3-pip ca-certificates curl
+DEBIAN_FRONTEND=noninteractive apt-get install -y git python3 python3-venv python3-pip ca-certificates curl util-linux
 
 TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 INSTALL_DIR="$TARGET_HOME/.local/share/compute-swarm"
@@ -54,8 +56,13 @@ REPO_DIR="$INSTALL_DIR/repo"
 VENV_DIR="$INSTALL_DIR/venv"
 CONFIG_DIR="$TARGET_HOME/.config/compute-swarm"
 ENV_FILE="$CONFIG_DIR/worker.env"
+UPDATE_ENV_FILE="/etc/compute-swarm/worker-update.env"
+STATE_DIR="/var/lib/compute-swarm"
+SERVICE_NAME="compute-swarm-worker"
+UPDATE_SERVICE="${SERVICE_NAME}-update"
 
 install -d -o "$TARGET_USER" -g "$TARGET_USER" "$INSTALL_DIR" "$CONFIG_DIR"
+install -d -m 755 /etc/compute-swarm "$STATE_DIR"
 
 if [[ -d "$REPO_DIR/.git" ]]; then
   sudo -u "$TARGET_USER" git -C "$REPO_DIR" fetch origin "$BRANCH"
@@ -68,17 +75,18 @@ fi
 sudo -u "$TARGET_USER" python3 -m venv "$VENV_DIR"
 sudo -u "$TARGET_USER" "$VENV_DIR/bin/python" -m pip install --upgrade pip
 sudo -u "$TARGET_USER" "$VENV_DIR/bin/python" -m pip install -r "$REPO_DIR/worker/requirements.txt"
+UPDATE_REQUIREMENTS="worker/requirements.txt"
 
 case "$ONNX" in
-  cpu) sudo -u "$TARGET_USER" "$VENV_DIR/bin/python" -m pip install -r "$REPO_DIR/worker/requirements-onnx.txt" ;;
-  gpu) sudo -u "$TARGET_USER" "$VENV_DIR/bin/python" -m pip install -r "$REPO_DIR/worker/requirements-onnx-gpu.txt" ;;
+  cpu) sudo -u "$TARGET_USER" "$VENV_DIR/bin/python" -m pip install -r "$REPO_DIR/worker/requirements-onnx.txt"; UPDATE_REQUIREMENTS+=",worker/requirements-onnx.txt" ;;
+  gpu) sudo -u "$TARGET_USER" "$VENV_DIR/bin/python" -m pip install -r "$REPO_DIR/worker/requirements-onnx-gpu.txt"; UPDATE_REQUIREMENTS+=",worker/requirements-onnx-gpu.txt" ;;
   none) ;;
   *) echo "Invalid --onnx value: $ONNX" >&2; exit 2 ;;
 esac
 
 case "$CUDA" in
-  12) sudo -u "$TARGET_USER" "$VENV_DIR/bin/python" -m pip install -r "$REPO_DIR/worker/requirements-cuda12.txt" ;;
-  13) sudo -u "$TARGET_USER" "$VENV_DIR/bin/python" -m pip install -r "$REPO_DIR/worker/requirements-cuda13.txt" ;;
+  12) sudo -u "$TARGET_USER" "$VENV_DIR/bin/python" -m pip install -r "$REPO_DIR/worker/requirements-cuda12.txt"; UPDATE_REQUIREMENTS+=",worker/requirements-cuda12.txt" ;;
+  13) sudo -u "$TARGET_USER" "$VENV_DIR/bin/python" -m pip install -r "$REPO_DIR/worker/requirements-cuda13.txt"; UPDATE_REQUIREMENTS+=",worker/requirements-cuda13.txt" ;;
   none) ;;
   *) echo "Invalid --cuda value: $CUDA" >&2; exit 2 ;;
 esac
@@ -96,7 +104,7 @@ EOF
 chown "$TARGET_USER:$TARGET_USER" "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
-cat > /etc/systemd/system/compute-swarm-worker.service <<EOF
+cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
 Description=Compute Swarm Worker
 After=network-online.target
@@ -117,11 +125,57 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
 
+cat > "$UPDATE_ENV_FILE" <<EOF
+SWARM_UPDATE_REPO_DIR=$REPO_DIR
+SWARM_UPDATE_BRANCH=$BRANCH
+SWARM_UPDATE_GIT_USER=$TARGET_USER
+SWARM_UPDATE_PYTHON=$VENV_DIR/bin/python
+SWARM_UPDATE_REQUIREMENTS=$UPDATE_REQUIREMENTS
+SWARM_UPDATE_SERVICE=$SERVICE_NAME
+SWARM_UPDATE_STATE_FILE=$STATE_DIR/worker-update-state
+EOF
+chmod 600 "$UPDATE_ENV_FILE"
+
+cat > /etc/systemd/system/${UPDATE_SERVICE}.service <<EOF
+[Unit]
+Description=Compute Swarm Worker Automatic Update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=$UPDATE_ENV_FILE
+ExecStart=/bin/bash $REPO_DIR/scripts/auto-update-linux.sh
+EOF
+
+cat > /etc/systemd/system/${UPDATE_SERVICE}.timer <<EOF
+[Unit]
+Description=Check Compute Swarm Worker for updates
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=${UPDATE_INTERVAL_MINUTES}min
+RandomizedDelaySec=2min
+Persistent=true
+Unit=${UPDATE_SERVICE}.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
 systemctl daemon-reload
-systemctl enable --now compute-swarm-worker.service
+systemctl enable --now ${SERVICE_NAME}.service
+if [[ "$AUTO_UPDATE" == "1" ]]; then
+  systemctl enable --now ${UPDATE_SERVICE}.timer
+else
+  systemctl disable --now ${UPDATE_SERVICE}.timer >/dev/null 2>&1 || true
+fi
 
 echo
 echo "Compute Swarm worker installed and started."
 echo "Controller: $CONTROLLER"
-echo "Status: sudo systemctl status compute-swarm-worker"
-echo "Logs:   sudo journalctl -u compute-swarm-worker -f"
+echo "Auto updates: $([[ "$AUTO_UPDATE" == "1" ]] && echo "enabled every ~${UPDATE_INTERVAL_MINUTES} minutes" || echo disabled)"
+echo "Status: sudo systemctl status $SERVICE_NAME"
+echo "Logs:   sudo journalctl -u $SERVICE_NAME -f"
+echo "Update now: sudo systemctl start ${UPDATE_SERVICE}.service"
+echo "Update state: sudo cat $STATE_DIR/worker-update-state"

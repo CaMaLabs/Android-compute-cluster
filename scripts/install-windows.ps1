@@ -11,12 +11,14 @@ param(
     [ValidateSet("none","12","13")]
     [string]$Cuda = "none",
 
-    [string]$InstallDir = "$env:LOCALAPPDATA\ComputeSwarm"
+    [string]$InstallDir = "$env:LOCALAPPDATA\ComputeSwarm",
+
+    [int]$UpdateIntervalMinutes = 15
 )
 
 $ErrorActionPreference = "Stop"
 $RepoUrl = "https://github.com/CaMaLabs/Android-compute-cluster.git"
-$Branch = "agent/universal-compute-swarm"
+$Branch = "main"
 
 function Ensure-Command($Name, $WingetId) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
@@ -51,17 +53,22 @@ python -m venv $VenvDir
 $Python = Join-Path $VenvDir "Scripts\python.exe"
 & $Python -m pip install --upgrade pip
 & $Python -m pip install -r (Join-Path $RepoDir "worker\requirements.txt")
+$UpdateRequirements = @("worker\requirements.txt")
 
 if ($Onnx -eq "cpu") {
     & $Python -m pip install -r (Join-Path $RepoDir "worker\requirements-onnx.txt")
+    $UpdateRequirements += "worker\requirements-onnx.txt"
 } elseif ($Onnx -eq "gpu") {
     & $Python -m pip install -r (Join-Path $RepoDir "worker\requirements-onnx-gpu.txt")
+    $UpdateRequirements += "worker\requirements-onnx-gpu.txt"
 }
 
 if ($Cuda -eq "12") {
     & $Python -m pip install -r (Join-Path $RepoDir "worker\requirements-cuda12.txt")
+    $UpdateRequirements += "worker\requirements-cuda12.txt"
 } elseif ($Cuda -eq "13") {
     & $Python -m pip install -r (Join-Path $RepoDir "worker\requirements-cuda13.txt")
+    $UpdateRequirements += "worker\requirements-cuda13.txt"
 }
 
 $AllowInsecure = 0
@@ -91,12 +98,33 @@ $Settings = New-ScheduledTaskSettingsSet -RestartCount 20 -RestartInterval (New-
 Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Principal $Principal -Settings $Settings -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName
 
+$UpdateConfig = Join-Path $ConfigDir "update.env.ps1"
+$ReqLiteral = ($UpdateRequirements | ForEach-Object { "'$_'" }) -join ', '
+@"
+`$RepoDir = '$RepoDir'
+`$Branch = '$Branch'
+`$Python = '$Python'
+`$Requirements = @($ReqLiteral)
+`$WorkerTask = '$TaskName'
+`$StateFile = '$(Join-Path $ConfigDir "update-state.txt")'
+"@ | Set-Content -Encoding UTF8 $UpdateConfig
+
+$UpdateTaskName = "ComputeSwarmAutoUpdate"
+$UpdateScript = Join-Path $RepoDir "scripts\auto-update-windows.ps1"
+$UpdateAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$UpdateScript`" -ConfigFile `"$UpdateConfig`""
+$UpdateStart = (Get-Date).AddMinutes(5)
+$UpdateTrigger = New-ScheduledTaskTrigger -Once -At $UpdateStart -RepetitionInterval (New-TimeSpan -Minutes $UpdateIntervalMinutes) -RepetitionDuration (New-TimeSpan -Days 3650)
+$UpdateSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 20)
+Register-ScheduledTask -TaskName $UpdateTaskName -Action $UpdateAction -Trigger $UpdateTrigger -Principal $Principal -Settings $UpdateSettings -Force | Out-Null
+
 Write-Host ""
 Write-Host "Compute Swarm worker installed."
 Write-Host "Install directory: $InstallDir"
 Write-Host "Startup task: $TaskName"
+Write-Host "Auto-update task: $UpdateTaskName (every ~$UpdateIntervalMinutes minutes)"
 Write-Host "Controller: $ControllerUrl"
 Write-Host ""
-Write-Host "Stop:    Stop-ScheduledTask -TaskName '$TaskName'"
-Write-Host "Start:   Start-ScheduledTask -TaskName '$TaskName'"
-Write-Host "Remove:  Unregister-ScheduledTask -TaskName '$TaskName' -Confirm:`$false"
+Write-Host "Update now: Start-ScheduledTask -TaskName '$UpdateTaskName'"
+Write-Host "Update state: Get-Content '$(Join-Path $ConfigDir "update-state.txt")'"
+Write-Host "Stop worker: Stop-ScheduledTask -TaskName '$TaskName'"
+Write-Host "Start worker: Start-ScheduledTask -TaskName '$TaskName'"
