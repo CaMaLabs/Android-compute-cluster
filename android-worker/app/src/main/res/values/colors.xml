@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="swarm_primary">#4F46E5</color>
+    <color name="swarm_primary_dark">#3730A3</color>
+    <color name="swarm_secondary">#0F766E</color>
+    <color name="swarm_background">#F7F8FC</color>
+    <color name="swarm_surface">#FFFFFFFF</color>
+    <color name="swarm_text_primary">#171821</color>
+    <color name="swarm_text_secondary">#686A78</color>
+    <color name="swarm_success">#0F8A5F</color>
+    <color name="swarm_warning">#C77C02</color>
+    <color name="swarm_error">#B42318</color>
+    <color name="swarm_outline">#E2E4EC</color>
+</resources>

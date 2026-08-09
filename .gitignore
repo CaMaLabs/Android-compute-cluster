@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.db
+*.db-shm
+*.db-wal
+.compute-swarm-identity.json
+.env
+android-worker/.signing/

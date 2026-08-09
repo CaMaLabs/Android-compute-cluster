@@ -1,0 +1,18 @@
+services:
+  controller:
+    build:
+      context: .
+      dockerfile: coordinator/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+    environment:
+      SWARM_ADMIN_TOKEN: ${SWARM_ADMIN_TOKEN:?set SWARM_ADMIN_TOKEN}
+      SWARM_ENROLLMENT_TOKEN: ${SWARM_ENROLLMENT_TOKEN:?set SWARM_ENROLLMENT_TOKEN}
+      SWARM_LEASE_SECONDS: ${SWARM_LEASE_SECONDS:-120}
+      SWARM_MAX_ARTIFACT_BYTES: ${SWARM_MAX_ARTIFACT_BYTES:-2147483648}
+    volumes:
+      - swarm-data:/data
+
+volumes:
+  swarm-data:

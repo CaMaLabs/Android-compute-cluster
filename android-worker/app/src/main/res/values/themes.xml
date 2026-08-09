@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.ComputeSwarm" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/swarm_primary</item>
+        <item name="colorPrimaryContainer">#E9E8FF</item>
+        <item name="colorOnPrimaryContainer">#211F66</item>
+        <item name="colorSecondary">@color/swarm_secondary</item>
+        <item name="android:colorAccent">@color/swarm_primary</item>
+        <item name="android:windowBackground">@color/swarm_background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>
