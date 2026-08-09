@@ -18,9 +18,9 @@ message=$($Message -replace "`r?`n", ' ')
 }
 
 function Git-Text {
-    param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
-    $out = & git -C $RepoDir @Args
-    if ($LASTEXITCODE -ne 0) { throw "git $($Args -join ' ') failed" }
+    param([Parameter(ValueFromRemainingArguments=$true)][string[]]$GitArgs)
+    $out = & git -C $RepoDir @GitArgs
+    if ($LASTEXITCODE -ne 0) { throw "git $($GitArgs -join ' ') failed" }
     return ($out | Out-String).Trim()
 }
 
@@ -76,7 +76,7 @@ try {
         Start-ScheduledTask -TaskName $WorkerTask
         Start-Sleep -Seconds 3
         $task = Get-ScheduledTask -TaskName $WorkerTask
-        if ($task.State -eq 'Disabled') { throw "worker task is disabled after restart" }
+        if ($task.State -ne 'Running') { throw "worker task did not remain running after restart (state=$($task.State))" }
     }
 
     $new = Git-Text rev-parse HEAD

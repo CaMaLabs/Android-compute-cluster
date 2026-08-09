@@ -14,6 +14,8 @@ REPO_BRANCH="${SWARM_REPO_BRANCH:-main}"
 AUTO_UPDATE="${SWARM_AUTO_UPDATE:-1}"
 UPDATE_INTERVAL_MINUTES="${SWARM_UPDATE_INTERVAL_MINUTES:-15}"
 UPDATE_SERVICE="${SERVICE_NAME}-update"
+DEFAULT_REMOTE_URL="https://github.com/CaMaLabs/Android-compute-cluster.git"
+UPDATE_REMOTE_URL="${SWARM_UPDATE_REMOTE_URL:-}"
 
 if [[ $EUID -ne 0 ]]; then
   echo "Run this installer with sudo/root." >&2
@@ -32,20 +34,27 @@ systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
 
 if [[ -d "$REPO_URL/.git" ]]; then
   SOURCE_DIR="$(cd "$REPO_URL" && pwd)"
+  [[ -n "$UPDATE_REMOTE_URL" ]] || UPDATE_REMOTE_URL="$DEFAULT_REMOTE_URL"
   if [[ "$SOURCE_DIR" != "$APP_DIR" ]]; then
     rm -rf "$APP_DIR"
     mkdir -p "$(dirname "$APP_DIR")"
     cp -a "$SOURCE_DIR" "$APP_DIR"
   fi
 elif [[ -d "$APP_DIR/.git" ]]; then
+  [[ -n "$UPDATE_REMOTE_URL" ]] || UPDATE_REMOTE_URL="$(git -C "$APP_DIR" remote get-url origin 2>/dev/null || echo "$REPO_URL")"
   git config --global --add safe.directory "$APP_DIR" || true
   git -C "$APP_DIR" fetch origin "$REPO_BRANCH"
   git -C "$APP_DIR" checkout "$REPO_BRANCH"
   git -C "$APP_DIR" reset --hard "origin/$REPO_BRANCH"
 else
+  [[ -n "$UPDATE_REMOTE_URL" ]] || UPDATE_REMOTE_URL="$REPO_URL"
   rm -rf "$APP_DIR"
   git clone --branch "$REPO_BRANCH" --single-branch "$REPO_URL" "$APP_DIR"
 fi
+
+# A local bootstrap checkout may use the administrator's SSH credentials. Normalize
+# the installed copy to a non-interactive update remote so the service account can fetch.
+git -C "$APP_DIR" remote set-url origin "$UPDATE_REMOTE_URL"
 
 python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install --upgrade pip wheel
@@ -171,6 +180,7 @@ Health:         http://${IP_ADDR:-127.0.0.1}:$PORT/health
 Experiments:    http://${IP_ADDR:-127.0.0.1}:$PORT/experiments
 Pokemon CABT:   http://${IP_ADDR:-127.0.0.1}:$PORT/pokemon
 Local URL:      http://127.0.0.1:$PORT
+Update remote:  $UPDATE_REMOTE_URL
 Auto updates:   $([[ "$AUTO_UPDATE" == "1" ]] && echo "enabled every ~${UPDATE_INTERVAL_MINUTES} minutes" || echo disabled)
 Update state:   $DATA_DIR/controller-update-state
 
