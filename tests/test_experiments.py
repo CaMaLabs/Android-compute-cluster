@@ -51,6 +51,8 @@ def test_dashboard_launcher_registers_root_route(tmp_path, monkeypatch):
         response = client.get("/")
         assert response.status_code == 200
         assert "Compute Swarm" in response.text
+        assert "New experiment" in response.text
+        assert "/experiments" in response.text
 
 
 def test_parameter_sweep_ranking_and_refinement(tmp_path, monkeypatch):
