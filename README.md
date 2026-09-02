@@ -6,19 +6,34 @@ Workers connect **outbound** to a controller, advertise locally installed capabi
 
 The high-level interface is the **distributed experiment engine**: submit a parameter grid, let the swarm distribute independent parameter points across whatever devices are available, rank the results, and optionally launch a finer refinement sweep around promising regions.
 
+## Windows worker — one-click installer
+
+**Primary Windows x64 download:** [`ComputeSwarmWorkerInstaller.exe`](releases/ComputeSwarmWorkerInstaller.exe)
+
+**Windows ARM64 download:** [`ComputeSwarmWorkerInstaller-arm64.exe`](releases/ComputeSwarmWorkerInstaller-arm64.exe)
+
+Double-click the EXE on a Windows machine. It defaults to the controller at `https://45.50.0.74:8675`, enumerates installed graphics adapters, installs Git/Python and the appropriate CUDA/ONNX worker dependencies, sends a device join request to the controller, waits for you to approve it in the controller dashboard, then initializes the worker and configures startup plus automatic updates. No shared enrollment token needs to be entered on the worker.
+
+The EXE contains the repository's `scripts/install-windows-auto.ps1` installer as an embedded resource. Its build source is in [`windows-installer/`](windows-installer/), and CI rebuilds both x64 and ARM64 executables. Current builds are published into [`releases/`](releases/).
+
+> The Windows installer is not Authenticode-signed yet, so Windows SmartScreen may identify it as an unknown publisher. The complete installer source and reproducible CI build are in this repository.
+
 ## Included components
 
-- `coordinator/` — FastAPI controller, SQLite state, scheduler, experiment engine, artifact store, and web dashboard.
+- `coordinator/` — FastAPI controller, SQLite state, scheduler, experiment engine, artifact store, controller-approved worker pairing, and web dashboard.
 - `worker/` — portable Python/Termux worker with optional CUDA/CuPy and ONNX Runtime backends.
 - `rust-worker/` — native cross-platform worker for desktops, servers, Raspberry Pis, and SBCs.
 - `android-worker/` — native Android foreground-service worker with LiteRT and optional Vulkan Compute.
-- `scripts/` — Ubuntu controller/worker and Windows worker installers.
+- `windows-installer/` — self-contained .NET Windows EXE bootstrapper with the automatic worker installer embedded.
+- `scripts/` — Ubuntu controller/worker and Windows worker installation/update scripts.
 
 All worker implementations speak the same controller protocol and task/capability vocabulary.
 
 ## Security model
 
 The controller does **not** send shell commands, executables, source code, CUDA kernels, Vulkan shaders, or arbitrary command lines. It sends a registered task name plus JSON/artifact input. A device receives a task only if it already advertises the corresponding local `task:<kind>` capability.
+
+New automatic Windows workers use controller-approved pairing: the worker can request access without knowing the shared enrollment token, but it receives no usable worker credential until an administrator explicitly approves that device in the controller dashboard.
 
 The Rust worker supports optional executable plugins, but executable paths and arguments are configured locally by the device owner. The remote controller cannot install or select arbitrary executables.
 
@@ -91,13 +106,12 @@ curl -X POST http://127.0.0.1:8765/experiments \
   -H 'Content-Type: application/json' \
   -d '{
     "name":"example sweep",
-    "task":"my_simulation",
+    "task":"prime_count",
     "parameters":{
-      "voltage":{"values":[100,200,300,400]},
-      "field_strength":{"start":0.1,"stop":1.0,"step":0.1},
-      "geometry_scale":{"start":0.5,"stop":1.0,"step":0.05}
+      "start":{"values":[2,200002,400002,600002]},
+      "end":{"values":[1000000]}
     },
-    "objective":{"path":"metrics.efficiency","direction":"maximize"},
+    "objective":{"path":"count","direction":"maximize"},
     "requirements":{"capabilities":["cpu"]}
   }'
 ```
@@ -283,4 +297,4 @@ pip install -r coordinator/requirements.txt -r worker/requirements.txt pytest ht
 pytest -q
 ```
 
-GitHub Actions runs the controller/experiment tests, ONNX execution test, Rust `cargo check`, and a full Android debug APK build including NDK/Vulkan/LiteRT. Successful Android builds are signed with the project signing identity and published to `releases/compute-swarm-worker.apk`.
+GitHub Actions runs the controller/experiment tests, ONNX execution test, Rust `cargo check`, Windows installer builds/smoke test, and a full Android debug APK build including NDK/Vulkan/LiteRT. Successful `main` builds publish the Windows x64/ARM64 installer executables and signed Android APK into `releases/`.
