@@ -97,7 +97,8 @@ jobs:
           Copy-Item windows-installer/dist/ComputeSwarmWorkerInstaller.exe releases/ComputeSwarmWorkerInstaller.exe -Force
           Copy-Item windows-installer/dist/ComputeSwarmWorkerInstaller-arm64.exe releases/ComputeSwarmWorkerInstaller-arm64.exe -Force
           git add releases/ComputeSwarmWorkerInstaller.exe releases/ComputeSwarmWorkerInstaller-arm64.exe
-          if (-not (git diff --cached --quiet)) {
+          $changed = @(git diff --cached --name-only)
+          if ($changed.Count -gt 0) {
             git commit -m "Publish Windows worker installer [skip ci]"
             git push
           }
