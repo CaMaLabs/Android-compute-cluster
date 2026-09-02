@@ -1,8 +1,8 @@
 param(
     [string]$ControllerUrl = "https://45.50.0.74:8675",
-    [string]$EnrollmentToken = $env:SWARM_ENROLLMENT_TOKEN,
     [string]$InstallDir = "$env:LOCALAPPDATA\ComputeSwarm",
     [int]$UpdateIntervalMinutes = 15,
+    [int]$PairingTimeoutMinutes = 15,
     [switch]$AllowInsecurePublicController
 )
 
@@ -34,22 +34,19 @@ if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
     Ensure-Command "python" "Python.Python.3.12"
 }
 
-if ([string]::IsNullOrWhiteSpace($EnrollmentToken)) {
-    $secure = Read-Host "Controller enrollment token" -AsSecureString
-    $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-    try { $EnrollmentToken = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
-    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
-}
-if ([string]::IsNullOrWhiteSpace($EnrollmentToken)) {
-    throw "An enrollment token is required for first-time enrollment. The controller generates each worker's device token automatically after this bootstrap step."
-}
-
 $uri = [Uri]$ControllerUrl
 $AllowInsecure = 0
 if ($uri.Scheme -eq 'http') {
     $privateHost = $uri.Host -match '^(localhost|127\.0\.0\.1|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)'
     if ($privateHost -or $AllowInsecurePublicController) { $AllowInsecure = 1 }
-    else { throw "Public HTTP controller refused. Use HTTPS, or explicitly pass -AllowInsecurePublicController if you accept plaintext credentials on the network." }
+    else { throw "Public HTTP controller refused. Use HTTPS, or explicitly pass -AllowInsecurePublicController if you accept plaintext pairing credentials on the network." }
+}
+
+try {
+    $health = Invoke-RestMethod -Method Get -Uri "$ControllerUrl/health" -TimeoutSec 15
+    if (-not $health.ok) { throw "controller health response was not OK" }
+} catch {
+    throw "Cannot reach Compute Swarm controller at $ControllerUrl. $($_.Exception.Message)"
 }
 
 $GpuControllers = @()
@@ -77,6 +74,7 @@ if ($HasNvidia -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
 $RepoDir = Join-Path $InstallDir "repo"
 $VenvDir = Join-Path $InstallDir "venv"
 $ConfigDir = Join-Path $InstallDir "config"
+$IdentityFile = Join-Path $ConfigDir "worker-identity.json"
 New-Item -ItemType Directory -Force -Path $InstallDir, $ConfigDir | Out-Null
 
 if (Test-Path (Join-Path $RepoDir ".git")) {
@@ -93,7 +91,6 @@ $Python = Join-Path $VenvDir "Scripts\python.exe"
 & $Python -m pip install -r (Join-Path $RepoDir "worker\requirements.txt")
 $UpdateRequirements = @("worker\requirements.txt")
 
-# ONNX CPU is useful on every Windows worker. NVIDIA workers are upgraded to the CUDA provider.
 if ($HasNvidia) {
     Write-Host "NVIDIA GPU detected; installing GPU inference backend..."
     & $Python -m pip install -r (Join-Path $RepoDir "worker\requirements-onnx-gpu.txt")
@@ -118,15 +115,68 @@ $GpuVendor = if ($HasNvidia) { "nvidia" } elseif ($HasAmd) { "amd" } elseif ($Ha
 $GpuName = Escape-SwarmValue (($GpuControllers -join " + "))
 $Labels = "gpu_vendor=$(Escape-SwarmValue $GpuVendor),gpu_name=$GpuName,installer=windows-auto"
 
+if (-not (Test-Path $IdentityFile)) {
+    $OsCaption = "Windows"
+    try { $OsCaption = (Get-CimInstance Win32_OperatingSystem).Caption } catch {}
+    $PairBody = @{
+        name = $env:COMPUTERNAME
+        os_name = "Windows"
+        platform = $OsCaption
+        arch = $env:PROCESSOR_ARCHITECTURE
+        gpu_name = ($GpuControllers -join " + ")
+        labels = @{
+            gpu_vendor = $GpuVendor
+            gpu_name = $GpuName
+            installer = "windows-auto"
+        }
+    }
+
+    Write-Host ""
+    Write-Host "Requesting permission to join the swarm..."
+    $Pairing = Invoke-RestMethod -Method Post -Uri "$ControllerUrl/pairing/request" -ContentType "application/json" -Body ($PairBody | ConvertTo-Json -Depth 5) -TimeoutSec 20
+    if (-not $Pairing.request_id -or -not $Pairing.claim_secret) {
+        throw "Controller did not return a valid pairing request. Make sure the controller has the pairing update installed."
+    }
+
+    Write-Host "Pairing request sent for $env:COMPUTERNAME."
+    Write-Host "Approve this device in the controller dashboard: $ControllerUrl/"
+    Write-Host "Waiting for controller approval..."
+
+    $deadline = (Get-Date).AddMinutes($PairingTimeoutMinutes)
+    $encodedSecret = [Uri]::EscapeDataString([string]$Pairing.claim_secret)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 2
+        $PairStatus = Invoke-RestMethod -Method Get -Uri "$ControllerUrl/pairing/request/$($Pairing.request_id)?secret=$encodedSecret" -TimeoutSec 20
+        if ($PairStatus.status -eq "approved") {
+            if (-not $PairStatus.worker_id -or -not $PairStatus.device_token) {
+                throw "Controller approved the request but did not return worker credentials."
+            }
+            @{
+                worker_id = [string]$PairStatus.worker_id
+                device_token = [string]$PairStatus.device_token
+            } | ConvertTo-Json | Set-Content -Encoding UTF8 $IdentityFile
+            Write-Host "Controller approved this worker. Identity received."
+            break
+        }
+        if ($PairStatus.status -eq "denied") { throw "The controller denied this device's join request." }
+        if ($PairStatus.status -eq "expired") { throw "The pairing request expired before it was approved." }
+    }
+    if (-not (Test-Path $IdentityFile)) {
+        throw "Timed out waiting for controller approval after $PairingTimeoutMinutes minutes. Rerun the installer to create a new request."
+    }
+} else {
+    Write-Host "Existing controller-issued worker identity found; pairing approval is not required again."
+}
+
 $EnvFile = Join-Path $ConfigDir "worker.env.ps1"
 $SafeController = $ControllerUrl.Replace("'", "''")
-$SafeToken = $EnrollmentToken.Replace("'", "''")
 $SafeLabels = $Labels.Replace("'", "''")
+$SafeIdentity = $IdentityFile.Replace("'", "''")
 @"
 `$env:SWARM_CONTROLLER_URL = '$SafeController'
-`$env:SWARM_ENROLLMENT_TOKEN = '$SafeToken'
 `$env:SWARM_ALLOW_INSECURE_REMOTE = '$AllowInsecure'
 `$env:SWARM_LABELS = '$SafeLabels'
+`$env:SWARM_IDENTITY_FILE = '$SafeIdentity'
 "@ | Set-Content -Encoding UTF8 $EnvFile
 
 $Runner = Join-Path $InstallDir "run-worker.ps1"
@@ -136,13 +186,12 @@ $Runner = Join-Path $InstallDir "run-worker.ps1"
 & '$Python' '$RepoDir\worker\worker.py'
 "@ | Set-Content -Encoding UTF8 $Runner
 
-# Run once interactively so enrollment/accelerator problems fail during installation rather than at the next logon.
-Write-Host "Testing controller connectivity and worker enrollment..."
+Write-Host "Testing worker initialization and accelerator discovery..."
 . $EnvFile
 $Probe = Start-Process -FilePath $Python -ArgumentList @((Join-Path $RepoDir "worker\worker.py")) -PassThru -WindowStyle Hidden
 Start-Sleep -Seconds 8
 if ($Probe.HasExited -and $Probe.ExitCode -ne 0) {
-    throw "Worker exited during enrollment/initialization with code $($Probe.ExitCode). Run $Runner manually to see the worker error."
+    throw "Worker exited during initialization with code $($Probe.ExitCode). Run $Runner manually to see the worker error."
 }
 if (-not $Probe.HasExited) { Stop-Process -Id $Probe.Id -Force }
 
@@ -174,12 +223,10 @@ $UpdateSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInst
 Register-ScheduledTask -TaskName $UpdateTaskName -Action $UpdateAction -Trigger $UpdateTrigger -Principal $Principal -Settings $UpdateSettings -Force | Out-Null
 
 Write-Host ""
-Write-Host "Compute Swarm worker installed and initialized."
+Write-Host "Compute Swarm worker installed, approved, and initialized."
 Write-Host "Controller: $ControllerUrl"
 Write-Host "GPU vendor: $GpuVendor"
 Write-Host "GPU(s): $($GpuControllers -join '; ')"
 Write-Host "Worker task: $TaskName"
 Write-Host "Auto-update task: $UpdateTaskName"
 Write-Host "Install directory: $InstallDir"
-Write-Host ""
-Write-Host "The controller-issued worker/device token is now stored in the worker identity file automatically."
