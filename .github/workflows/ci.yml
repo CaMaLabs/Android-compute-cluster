@@ -26,6 +26,7 @@ jobs:
         shell: pwsh
         run: |
           [void][scriptblock]::Create((Get-Content -Raw scripts/install-windows.ps1))
+          [void][scriptblock]::Create((Get-Content -Raw scripts/install-windows-auto.ps1))
           [void][scriptblock]::Create((Get-Content -Raw scripts/auto-update-windows.ps1))
 
   onnx-worker:
