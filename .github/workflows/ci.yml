@@ -48,6 +48,60 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo check --manifest-path rust-worker/Cargo.toml
 
+  windows-installer:
+    if: github.event_name != 'schedule'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Publish x64 installer
+        shell: pwsh
+        run: |
+          dotnet publish windows-installer/ComputeSwarmWorkerInstaller.csproj `
+            -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=true `
+            -o windows-installer/out/x64
+      - name: Publish ARM64 installer
+        shell: pwsh
+        run: |
+          dotnet publish windows-installer/ComputeSwarmWorkerInstaller.csproj `
+            -c Release -r win-arm64 --self-contained true `
+            -p:PublishSingleFile=true `
+            -o windows-installer/out/arm64
+      - name: Smoke test x64 installer executable
+        shell: pwsh
+        run: |
+          & windows-installer/out/x64/ComputeSwarmWorkerInstaller.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Stage installer executables
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force windows-installer/dist | Out-Null
+          Copy-Item windows-installer/out/x64/ComputeSwarmWorkerInstaller.exe windows-installer/dist/ComputeSwarmWorkerInstaller.exe
+          Copy-Item windows-installer/out/arm64/ComputeSwarmWorkerInstaller.exe windows-installer/dist/ComputeSwarmWorkerInstaller-arm64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compute-swarm-windows-installer
+          path: windows-installer/dist/*.exe
+          if-no-files-found: error
+      - name: Publish Windows installers into repository
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
+          New-Item -ItemType Directory -Force releases | Out-Null
+          Copy-Item windows-installer/dist/ComputeSwarmWorkerInstaller.exe releases/ComputeSwarmWorkerInstaller.exe -Force
+          Copy-Item windows-installer/dist/ComputeSwarmWorkerInstaller-arm64.exe releases/ComputeSwarmWorkerInstaller-arm64.exe -Force
+          git add releases/ComputeSwarmWorkerInstaller.exe releases/ComputeSwarmWorkerInstaller-arm64.exe
+          if (-not (git diff --cached --quiet)) {
+            git commit -m "Publish Windows worker installer [skip ci]"
+            git push
+          }
+
   android-worker:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
