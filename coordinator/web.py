@@ -17,11 +17,12 @@ DASHBOARD_HTML = r'''<!doctype html>
     .wrap{max-width:1240px;margin:auto;padding:28px 18px 48px}.top{display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:20px}
     h1{font-size:28px;margin:0}.sub{color:var(--muted);margin-top:4px}.auth{display:flex;gap:8px;align-items:center;min-width:min(100%,460px)}
     input,textarea{background:#0d1425;border:1px solid var(--line);border-radius:11px;color:var(--text);padding:11px 12px;outline:none}.auth input{flex:1}textarea{width:100%;min-height:250px;resize:vertical;font:13px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}
-    button{border:0;border-radius:11px;padding:11px 16px;background:var(--accent);color:white;font-weight:700;cursor:pointer}button.secondary{background:#27314c}button.small{padding:7px 10px;font-size:12px}button:disabled{opacity:.5;cursor:not-allowed}
+    button{border:0;border-radius:11px;padding:11px 16px;background:var(--accent);color:white;font-weight:700;cursor:pointer}button.secondary{background:#27314c}button.danger{background:#813745}button.small{padding:7px 10px;font-size:12px}button:disabled{opacity:.5;cursor:not-allowed}
     .statusline{display:flex;gap:10px;align-items:center;color:var(--muted);margin:10px 0 18px}.dot{width:10px;height:10px;border-radius:50%;background:#71809b}.dot.ok{background:var(--ok)}.dot.bad{background:var(--bad)}
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}.card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:16px;padding:16px;box-shadow:0 12px 28px #0003}
     .metric{font-size:29px;font-weight:800;margin-top:4px}.label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}
     .section{margin-top:16px}.section h2{font-size:18px;margin:0}.sectionhead{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;flex-wrap:wrap}.hint{color:var(--muted);font-size:13px;margin:5px 0 12px}
+    .pairing{border-color:#6f61dc;box-shadow:0 0 0 1px #6f61dc55,0 12px 28px #0003}.pairing h2{display:flex;gap:8px;align-items:center}.badge{display:inline-flex;min-width:24px;height:24px;padding:0 7px;border-radius:999px;align-items:center;justify-content:center;background:var(--warn);color:#17120b;font-size:12px;font-weight:800}
     table{width:100%;border-collapse:collapse;min-width:680px}.scroll{overflow:auto}.th,th{color:var(--muted);font-size:12px;text-align:left;font-weight:600}th,td{padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:top}.pill{display:inline-block;padding:3px 8px;border-radius:999px;background:#27314c;margin:2px 3px 2px 0;font-size:11px}.online{color:var(--ok)}.offline{color:var(--bad)}.warn{color:var(--warn)}.empty{color:var(--muted);padding:16px 0}.error{color:#ff9da8;white-space:pre-wrap;margin-top:10px}.success{color:var(--ok);white-space:pre-wrap;margin-top:10px}.hidden{display:none}
     .twocol{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(300px,.7fr);gap:14px}.best{background:#10182a;border:1px solid var(--line);border-radius:12px;padding:12px;min-height:80px;white-space:pre-wrap;font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;color:#cdd6ed}
     @media(max-width:850px){.twocol{grid-template-columns:1fr}} @media(max-width:520px){.wrap{padding:18px 12px}h1{font-size:23px}.auth{min-width:100%}}
@@ -37,9 +38,15 @@ DASHBOARD_HTML = r'''<!doctype html>
   <div class="grid">
     <div class="card"><div class="label">Workers online</div><div id="workersOnline" class="metric">—</div></div>
     <div class="card"><div class="label">Workers total</div><div id="workersTotal" class="metric">—</div></div>
+    <div class="card"><div class="label">Pending joins</div><div id="pairingsPending" class="metric">—</div></div>
     <div class="card"><div class="label">Experiments</div><div id="experimentsTotal" class="metric">—</div></div>
     <div class="card"><div class="label">Jobs</div><div id="jobsTotal" class="metric">—</div></div>
     <div class="card"><div class="label">Artifacts</div><div id="artifacts" class="metric">—</div></div>
+  </div>
+
+  <div id="pairingCard" class="card section pairing hidden">
+    <div class="sectionhead"><div><h2>Devices requesting access <span id="pairingBadge" class="badge">0</span></h2><div class="hint">Workers cannot execute swarm jobs until you explicitly approve them here. No shared enrollment token is sent to the worker.</div></div></div>
+    <div class="scroll"><table><thead><tr><th>Device</th><th>Source</th><th>Platform</th><th>GPU</th><th>Requested</th><th>Decision</th></tr></thead><tbody id="pairings"></tbody></table></div>
   </div>
 
   <div class="card section">
@@ -77,7 +84,7 @@ DASHBOARD_HTML = r'''<!doctype html>
   <div id="error" class="error"></div>
 </div>
 <script>
-const $=id=>document.getElementById(id); let timer=null;
+const $=id=>document.getElementById(id); let timer=null; const promptedPairings=new Set();
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const cleanToken=()=>$('token').value.replace(/[^a-fA-F0-9]/g,'').trim();
 const tokenHeaders=()=>({Authorization:'Bearer '+cleanToken()});
@@ -85,15 +92,24 @@ function bytes(n){if(!n)return '0 B';let u=['B','KB','MB','GB','TB'],i=0;while(n
 function age(ts){if(!ts)return '—';let s=Math.max(0,Date.now()/1000-ts);if(s<60)return Math.round(s)+'s ago';if(s<3600)return Math.round(s/60)+'m ago';return Math.round(s/3600)+'h ago'}
 function objectiveLabel(o){return o?`${esc(o.direction)} · ${esc(o.path)}`:'—'}
 async function jsonFetch(path,options={}){const r=await fetch(path,options);let d=null;try{d=await r.json()}catch(_){ }if(!r.ok)throw new Error(d?.detail||`HTTP ${r.status}`);return d}
+async function pairingDecision(id,approve){
+ try{await jsonFetch(`/pairing/request/${encodeURIComponent(id)}/${approve?'approve':'deny'}`,{method:'POST',headers:tokenHeaders()});await refresh()}catch(e){$('error').textContent=e.message}
+}
+function renderPairings(items){
+ $('pairingsPending').textContent=items.length;$('pairingBadge').textContent=items.length;$('pairingCard').classList.toggle('hidden',items.length===0);
+ $('pairings').innerHTML=items.length?items.map(p=>`<tr><td><b>${esc(p.name)}</b><br><small>${esc(p.request_id).slice(0,12)}</small></td><td>${esc(p.remote_addr||'—')}</td><td>${esc(p.os_name||'unknown')} · ${esc(p.arch||'unknown')}<br><small>${esc(p.platform||'')}</small></td><td>${esc(p.gpu_name||'—')}</td><td>${age(p.requested_at)}<br><small>expires ${age(p.expires_at)}</small></td><td><button class="small" onclick="pairingDecision('${esc(p.request_id)}',true)">Approve</button> <button class="small danger" onclick="pairingDecision('${esc(p.request_id)}',false)">Deny</button></td></tr>`).join(''):'<tr><td colspan="6" class="empty">No devices waiting for approval.</td></tr>';
+ for(const p of items){if(promptedPairings.has(p.request_id))continue;promptedPairings.add(p.request_id);const details=[p.name,p.remote_addr,p.os_name,p.arch,p.gpu_name].filter(Boolean).join('\n');if(confirm(`A device wants to join the Compute Swarm:\n\n${details}\n\nApprove this device?`)){pairingDecision(p.request_id,true)}}
+}
 async function refresh(){
  const token=cleanToken(); $('token').value=token; if(!token)return;
  try{
-  const [d,e]=await Promise.all([
+  const [d,e,p]=await Promise.all([
     jsonFetch('/status',{headers:tokenHeaders()}),
-    jsonFetch('/experiments',{headers:tokenHeaders()})
+    jsonFetch('/experiments',{headers:tokenHeaders()}),
+    jsonFetch('/pairing/pending',{headers:tokenHeaders()})
   ]);
   localStorage.setItem('swarmAdminToken',token); $('dot').className='dot ok'; $('state').textContent='Connected · auto-refreshing every 3 seconds'; $('error').textContent='';
-  $('workersOnline').textContent=d.workers.filter(w=>w.online).length; $('workersTotal').textContent=d.workers.length; $('experimentsTotal').textContent=e.experiments.length; $('jobsTotal').textContent=d.jobs.length; $('artifacts').textContent=d.artifacts.count+' · '+bytes(d.artifacts.bytes);
+  $('workersOnline').textContent=d.workers.filter(w=>w.online).length; $('workersTotal').textContent=d.workers.length; $('experimentsTotal').textContent=e.experiments.length; $('jobsTotal').textContent=d.jobs.length; $('artifacts').textContent=d.artifacts.count+' · '+bytes(d.artifacts.bytes);renderPairings(p.requests||[]);
   $('workers').innerHTML=d.workers.length?d.workers.map(w=>`<tr><td class="${w.online?'online':'offline'}">${w.online?'● Online':'● Offline'}</td><td><b>${esc(w.name)}</b><br><small>${esc(w.id).slice(0,12)}</small></td><td>${esc(w.os_name)}<br><small>${esc(w.arch)}</small></td><td>${w.cores} cores<br><small>${w.memory_mb?Math.round(w.memory_mb/1024*10)/10+' GB':'—'}</small></td><td>${w.battery_pct==null?'—':w.battery_pct+'%'}${w.charging?' ⚡':''}<br><small>${w.temperature_c==null?'—':w.temperature_c+' °C'}</small></td><td>${(w.capabilities||[]).slice(0,12).map(c=>`<span class="pill">${esc(c)}</span>`).join('')}</td><td>${age(w.last_seen)}</td></tr>`).join(''):'<tr><td colspan="7" class="empty">No workers enrolled yet.</td></tr>';
   $('experiments').innerHTML=e.experiments.length?e.experiments.map(x=>`<tr><td><b>${esc(x.name)}</b><br><small>${esc(x.experiment_id).slice(0,12)}</small></td><td>${esc(x.task)}</td><td>${x.generation||0}</td><td>${x.done||0} / ${x.units||0}</td><td>${x.queued||0} / ${x.leased||0}</td><td class="${x.failed?'warn':''}">${x.failed||0}</td><td>${objectiveLabel(x.objective)}</td><td><button class="small secondary" onclick="showExperiment('${esc(x.experiment_id)}')">Results</button> <button class="small secondary" onclick="refineExperiment('${esc(x.experiment_id)}')">Refine</button></td></tr>`).join(''):'<tr><td colspan="8" class="empty">No experiments yet. Launch one above.</td></tr>';
   $('jobs').innerHTML=d.jobs.length?d.jobs.map(j=>`<tr><td><b>${esc(j.kind)}</b></td><td>${j.done||0} / ${j.units||0}</td><td>${j.leased||0}</td><td>${j.failed||0}</td><td>${j.priority}</td><td>${new Date(j.created_at*1000).toLocaleString()}</td><td><small>${esc(j.id).slice(0,12)}</small></td></tr>`).join(''):'<tr><td colspan="7" class="empty">No jobs submitted yet.</td></tr>';
