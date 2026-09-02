@@ -154,7 +154,7 @@ if (-not (Test-Path $IdentityFile)) {
             @{
                 worker_id = [string]$PairStatus.worker_id
                 device_token = [string]$PairStatus.device_token
-            } | ConvertTo-Json | Set-Content -Encoding UTF8 $IdentityFile
+            } | ConvertTo-Json | Set-Content -Encoding ASCII $IdentityFile
             Write-Host "Controller approved this worker. Identity received."
             break
         }
