@@ -53,8 +53,8 @@ internal static class Program
                           string.Equals(a, "-h", StringComparison.OrdinalIgnoreCase) ||
                           string.Equals(a, "--help", StringComparison.OrdinalIgnoreCase)))
         {
-            Console.WriteLine("Double-click with no arguments for the default controller:");
-            Console.WriteLine("  https://45.50.0.74:8675");
+            Console.WriteLine("Double-click with no arguments for the configured controller:");
+            Console.WriteLine("  http://45.50.0.74:8675");
             Console.WriteLine();
             Console.WriteLine("Advanced PowerShell installer parameters can be forwarded, for example:");
             Console.WriteLine("  ComputeSwarmWorkerInstaller.exe -ControllerUrl https://example.com:8675");
