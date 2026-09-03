@@ -12,7 +12,7 @@ The high-level interface is the **distributed experiment engine**: submit a para
 
 **Windows ARM64 download:** [`ComputeSwarmWorkerInstaller-arm64.exe`](releases/ComputeSwarmWorkerInstaller-arm64.exe)
 
-Double-click the EXE on a Windows machine. It defaults to the controller at `https://45.50.0.74:8675`, enumerates installed graphics adapters, installs Git/Python and the appropriate CUDA/ONNX worker dependencies, sends a device join request to the controller, waits for you to approve it in the controller dashboard, then initializes the worker and configures startup plus automatic updates. No shared enrollment token needs to be entered on the worker.
+Double-click the EXE on a Windows machine. It defaults to the configured controller at `http://45.50.0.74:8675`, enumerates installed graphics adapters, installs Git/Python and the appropriate CUDA/ONNX worker dependencies, sends a device join request to the controller, waits for you to approve it in the controller dashboard, then initializes the worker and configures startup plus automatic updates. No shared enrollment token needs to be entered on the worker and no command-line flags are required for the built-in controller.
 
 The EXE contains the repository's `scripts/install-windows-auto.ps1` installer as an embedded resource. Its build source is in [`windows-installer/`](windows-installer/), and CI rebuilds both x64 and ARM64 executables. Current builds are published into [`releases/`](releases/).
 
@@ -37,12 +37,12 @@ New automatic Windows workers use controller-approved pairing: the worker can re
 
 The Rust worker supports optional executable plugins, but executable paths and arguments are configured locally by the device owner. The remote controller cannot install or select arbitrary executables.
 
-Remote/public controllers must use HTTPS. Plain HTTP is intended only for loopback or trusted LAN/hotspot use.
+Public controllers should use HTTPS. The currently configured deployment at `http://45.50.0.74:8675` is explicitly trusted by the Windows installer so one-click setup works with the existing controller, but its HTTP transport is plaintext. Other public HTTP controller URLs are still refused unless `-AllowInsecurePublicController` is passed explicitly.
 
 ## Architecture
 
 ```text
-                         HTTPS / trusted-LAN HTTP
+                         HTTPS / trusted HTTP
 
  Android APK  ───────────────┐
  Python/Termux ──────────────┤
