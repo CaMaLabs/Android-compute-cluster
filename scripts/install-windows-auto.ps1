@@ -27,6 +27,30 @@ function Escape-SwarmValue([string]$Value) {
     return ($Value -replace '[,=\r\n]', '_').Trim()
 }
 
+function Find-CudaToolkitPath {
+    if ($env:CUDA_PATH -and (Test-Path $env:CUDA_PATH)) {
+        return $env:CUDA_PATH
+    }
+
+    $nvcc = Get-Command nvcc -ErrorAction SilentlyContinue
+    if ($nvcc -and $nvcc.Source) {
+        $binDir = Split-Path $nvcc.Source -Parent
+        $candidate = Split-Path $binDir -Parent
+        if (Test-Path $candidate) { return $candidate }
+    }
+
+    $cudaRoot = Join-Path $env:ProgramFiles "NVIDIA GPU Computing Toolkit\CUDA"
+    if (Test-Path $cudaRoot) {
+        $candidate = Get-ChildItem $cudaRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^v\d+\.\d+$' } |
+            Sort-Object { [version]($_.Name.TrimStart('v')) } -Descending |
+            Select-Object -First 1
+        if ($candidate) { return $candidate.FullName }
+    }
+
+    return $null
+}
+
 Write-Host "Compute Swarm automatic Windows worker installer"
 Write-Host "Controller: $ControllerUrl"
 
@@ -79,6 +103,19 @@ if ($HasNvidia -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
     } catch {}
 }
 
+$CudaToolkitPath = $null
+if ($HasNvidia) {
+    $CudaToolkitPath = Find-CudaToolkitPath
+    if ($CudaToolkitPath) {
+        $env:CUDA_PATH = $CudaToolkitPath
+        $cudaBin = Join-Path $CudaToolkitPath "bin"
+        if (Test-Path $cudaBin) { $env:PATH = "$cudaBin;$env:PATH" }
+        Write-Host "Detected system CUDA Toolkit: $CudaToolkitPath"
+    } else {
+        Write-Host "No system CUDA Toolkit detected; CuPy will use NVIDIA CUDA component wheels inside the worker environment."
+    }
+}
+
 $RepoDir = Join-Path $InstallDir "repo"
 $VenvDir = Join-Path $InstallDir "venv"
 $ConfigDir = Join-Path $InstallDir "config"
@@ -105,14 +142,34 @@ if ($HasNvidia) {
     $UpdateRequirements += "worker\requirements-onnx-gpu.txt"
 
     if ($CudaMajor -ge 13) {
-        Write-Host "CUDA 13-compatible NVIDIA driver detected; installing CuPy CUDA 13 backend..."
+        Write-Host "CUDA 13-compatible NVIDIA driver detected; installing CuPy CUDA 13 backend with CUDA component libraries..."
         & $Python -m pip install -r (Join-Path $RepoDir "worker\requirements-cuda13.txt")
         $UpdateRequirements += "worker\requirements-cuda13.txt"
     } else {
-        Write-Host "Installing CuPy CUDA 12 backend (compatible default for NVIDIA Windows workers)..."
+        Write-Host "Installing CuPy CUDA 12 backend with CUDA component libraries (compatible default for NVIDIA Windows workers)..."
         & $Python -m pip install -r (Join-Path $RepoDir "worker\requirements-cuda12.txt")
         $UpdateRequirements += "worker\requirements-cuda12.txt"
     }
+
+    Write-Host "Testing CuPy CUDA execution..."
+    $CuPyProbeCode = @'
+import cupy as cp
+count = cp.cuda.runtime.getDeviceCount()
+if count < 1:
+    raise RuntimeError("CuPy reported no CUDA devices")
+x = cp.arange(8, dtype=cp.float32)
+y = x * x
+cp.cuda.Stream.null.synchronize()
+value = float(cp.asnumpy(y.sum()))
+if abs(value - 140.0) > 1e-4:
+    raise RuntimeError(f"CuPy validation returned unexpected result: {value}")
+print(f"CuPy CUDA ready: {count} device(s), validation={value:.1f}")
+'@
+    $CuPyProbe = (& $Python -c $CuPyProbeCode 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "CuPy CUDA self-test failed after installing the bundled CUDA component libraries. $CuPyProbe"
+    }
+    Write-Host $CuPyProbe
 } else {
     Write-Host "No NVIDIA CUDA adapter detected; installing CPU ONNX backend."
     & $Python -m pip install -r (Join-Path $RepoDir "worker\requirements-onnx.txt")
@@ -180,12 +237,17 @@ $EnvFile = Join-Path $ConfigDir "worker.env.ps1"
 $SafeController = $ControllerUrl.Replace("'", "''")
 $SafeLabels = $Labels.Replace("'", "''")
 $SafeIdentity = $IdentityFile.Replace("'", "''")
+$CudaEnvLine = ""
+if ($CudaToolkitPath) {
+    $SafeCudaPath = $CudaToolkitPath.Replace("'", "''")
+    $CudaEnvLine = "`$env:CUDA_PATH = '$SafeCudaPath'`r`n`$env:PATH = '$SafeCudaPath\bin;' + `$env:PATH`r`n"
+}
 @"
 `$env:SWARM_CONTROLLER_URL = '$SafeController'
 `$env:SWARM_ALLOW_INSECURE_REMOTE = '$AllowInsecure'
 `$env:SWARM_LABELS = '$SafeLabels'
 `$env:SWARM_IDENTITY_FILE = '$SafeIdentity'
-"@ | Set-Content -Encoding UTF8 $EnvFile
+$CudaEnvLine"@ | Set-Content -Encoding UTF8 $EnvFile
 
 $Runner = Join-Path $InstallDir "run-worker.ps1"
 @"
@@ -235,6 +297,7 @@ Write-Host "Compute Swarm worker installed, approved, and initialized."
 Write-Host "Controller: $ControllerUrl"
 Write-Host "GPU vendor: $GpuVendor"
 Write-Host "GPU(s): $($GpuControllers -join '; ')"
+if ($HasNvidia) { Write-Host "CuPy CUDA: validated" }
 Write-Host "Worker task: $TaskName"
 Write-Host "Auto-update task: $UpdateTaskName"
 Write-Host "Install directory: $InstallDir"
