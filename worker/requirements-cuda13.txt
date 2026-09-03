@@ -1,2 +1,2 @@
 numpy
-cupy-cuda13x
+cupy-cuda13x[ctk]
