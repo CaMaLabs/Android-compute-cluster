@@ -1,5 +1,5 @@
 param(
-    [string]$ControllerUrl = "https://45.50.0.74:8675",
+    [string]$ControllerUrl = "http://45.50.0.74:8675",
     [string]$InstallDir = "$env:LOCALAPPDATA\ComputeSwarm",
     [int]$UpdateIntervalMinutes = 15,
     [int]$PairingTimeoutMinutes = 15,
@@ -9,6 +9,7 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoUrl = "https://github.com/CaMaLabs/Android-compute-cluster.git"
 $Branch = "main"
+$TrustedDefaultController = "http://45.50.0.74:8675"
 
 function Ensure-Command($Name, $WingetId) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
@@ -38,8 +39,15 @@ $uri = [Uri]$ControllerUrl
 $AllowInsecure = 0
 if ($uri.Scheme -eq 'http') {
     $privateHost = $uri.Host -match '^(localhost|127\.0\.0\.1|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)'
-    if ($privateHost -or $AllowInsecurePublicController) { $AllowInsecure = 1 }
-    else { throw "Public HTTP controller refused. Use HTTPS, or explicitly pass -AllowInsecurePublicController if you accept plaintext pairing credentials on the network." }
+    $trustedBuiltInController = $ControllerUrl.TrimEnd('/') -eq $TrustedDefaultController
+    if ($privateHost -or $AllowInsecurePublicController -or $trustedBuiltInController) {
+        $AllowInsecure = 1
+        if ($trustedBuiltInController -and -not $privateHost) {
+            Write-Warning "Using the configured Compute Swarm controller over plaintext HTTP: $TrustedDefaultController"
+        }
+    } else {
+        throw "Public HTTP controller refused. Use HTTPS, or explicitly pass -AllowInsecurePublicController if you accept plaintext pairing credentials on the network."
+    }
 }
 
 try {
