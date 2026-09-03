@@ -18,6 +18,7 @@ function Ensure-Command($Name, $WingetId) {
         }
         Write-Host "Installing $Name..."
         winget install --id $WingetId --exact --accept-package-agreements --accept-source-agreements
+        if ($LASTEXITCODE -ne 0) { throw "winget failed while installing $Name with exit code $LASTEXITCODE." }
         $env:PATH = [Environment]::GetEnvironmentVariable("PATH","Machine") + ";" + [Environment]::GetEnvironmentVariable("PATH","User")
     }
 }
@@ -28,14 +29,11 @@ function Escape-SwarmValue([string]$Value) {
 }
 
 function Find-CudaToolkitPath {
-    if ($env:CUDA_PATH -and (Test-Path $env:CUDA_PATH)) {
-        return $env:CUDA_PATH
-    }
+    if ($env:CUDA_PATH -and (Test-Path $env:CUDA_PATH)) { return $env:CUDA_PATH }
 
     $nvcc = Get-Command nvcc -ErrorAction SilentlyContinue
     if ($nvcc -and $nvcc.Source) {
-        $binDir = Split-Path $nvcc.Source -Parent
-        $candidate = Split-Path $binDir -Parent
+        $candidate = Split-Path (Split-Path $nvcc.Source -Parent) -Parent
         if (Test-Path $candidate) { return $candidate }
     }
 
@@ -47,7 +45,6 @@ function Find-CudaToolkitPath {
             Select-Object -First 1
         if ($candidate) { return $candidate.FullName }
     }
-
     return $null
 }
 
@@ -124,30 +121,40 @@ New-Item -ItemType Directory -Force -Path $InstallDir, $ConfigDir | Out-Null
 
 if (Test-Path (Join-Path $RepoDir ".git")) {
     git -C $RepoDir fetch origin $Branch
+    if ($LASTEXITCODE -ne 0) { throw "git fetch failed." }
     git -C $RepoDir checkout $Branch
+    if ($LASTEXITCODE -ne 0) { throw "git checkout failed." }
     git -C $RepoDir reset --hard "origin/$Branch"
+    if ($LASTEXITCODE -ne 0) { throw "git reset failed." }
 } else {
     git clone --branch $Branch --single-branch $RepoUrl $RepoDir
+    if ($LASTEXITCODE -ne 0) { throw "git clone failed." }
 }
 
 python -m venv $VenvDir
+if ($LASTEXITCODE -ne 0) { throw "Failed to create Python virtual environment." }
 $Python = Join-Path $VenvDir "Scripts\python.exe"
 & $Python -m pip install --upgrade pip
+if ($LASTEXITCODE -ne 0) { throw "Failed to upgrade pip." }
 & $Python -m pip install -r (Join-Path $RepoDir "worker\requirements.txt")
+if ($LASTEXITCODE -ne 0) { throw "Failed to install base worker requirements." }
 $UpdateRequirements = @("worker\requirements.txt")
 
 if ($HasNvidia) {
     Write-Host "NVIDIA GPU detected; installing GPU inference backend..."
     & $Python -m pip install -r (Join-Path $RepoDir "worker\requirements-onnx-gpu.txt")
+    if ($LASTEXITCODE -ne 0) { throw "Failed to install ONNX Runtime GPU backend." }
     $UpdateRequirements += "worker\requirements-onnx-gpu.txt"
 
     if ($CudaMajor -ge 13) {
         Write-Host "CUDA 13-compatible NVIDIA driver detected; installing CuPy CUDA 13 backend with CUDA component libraries..."
         & $Python -m pip install -r (Join-Path $RepoDir "worker\requirements-cuda13.txt")
+        if ($LASTEXITCODE -ne 0) { throw "Failed to install CuPy CUDA 13 component toolkit." }
         $UpdateRequirements += "worker\requirements-cuda13.txt"
     } else {
         Write-Host "Installing CuPy CUDA 12 backend with CUDA component libraries (compatible default for NVIDIA Windows workers)..."
         & $Python -m pip install -r (Join-Path $RepoDir "worker\requirements-cuda12.txt")
+        if ($LASTEXITCODE -ne 0) { throw "Failed to install CuPy CUDA 12 component toolkit." }
         $UpdateRequirements += "worker\requirements-cuda12.txt"
     }
 
@@ -173,6 +180,7 @@ print(f"CuPy CUDA ready: {count} device(s), validation={value:.1f}")
 } else {
     Write-Host "No NVIDIA CUDA adapter detected; installing CPU ONNX backend."
     & $Python -m pip install -r (Join-Path $RepoDir "worker\requirements-onnx.txt")
+    if ($LASTEXITCODE -ne 0) { throw "Failed to install CPU ONNX backend." }
     $UpdateRequirements += "worker\requirements-onnx.txt"
 }
 
@@ -237,17 +245,18 @@ $EnvFile = Join-Path $ConfigDir "worker.env.ps1"
 $SafeController = $ControllerUrl.Replace("'", "''")
 $SafeLabels = $Labels.Replace("'", "''")
 $SafeIdentity = $IdentityFile.Replace("'", "''")
-$CudaEnvLine = ""
+$EnvLines = @(
+    "`$env:SWARM_CONTROLLER_URL = '$SafeController'",
+    "`$env:SWARM_ALLOW_INSECURE_REMOTE = '$AllowInsecure'",
+    "`$env:SWARM_LABELS = '$SafeLabels'",
+    "`$env:SWARM_IDENTITY_FILE = '$SafeIdentity'"
+)
 if ($CudaToolkitPath) {
     $SafeCudaPath = $CudaToolkitPath.Replace("'", "''")
-    $CudaEnvLine = "`$env:CUDA_PATH = '$SafeCudaPath'`r`n`$env:PATH = '$SafeCudaPath\bin;' + `$env:PATH`r`n"
+    $EnvLines += "`$env:CUDA_PATH = '$SafeCudaPath'"
+    $EnvLines += "`$env:PATH = '$SafeCudaPath\bin;' + `$env:PATH"
 }
-@"
-`$env:SWARM_CONTROLLER_URL = '$SafeController'
-`$env:SWARM_ALLOW_INSECURE_REMOTE = '$AllowInsecure'
-`$env:SWARM_LABELS = '$SafeLabels'
-`$env:SWARM_IDENTITY_FILE = '$SafeIdentity'
-$CudaEnvLine"@ | Set-Content -Encoding UTF8 $EnvFile
+$EnvLines | Set-Content -Encoding UTF8 $EnvFile
 
 $Runner = Join-Path $InstallDir "run-worker.ps1"
 @"
