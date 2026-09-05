@@ -79,8 +79,8 @@ DASHBOARD_HTML = r'''<!doctype html>
     <div id="bestResult" class="best hidden"></div>
   </div>
 
-  <div class="card section"><h2>Workers</h2><div class="scroll"><table><thead><tr><th>Status</th><th>Name</th><th>Platform</th><th>CPU / RAM</th><th>Battery / Temp</th><th>Capabilities</th><th>Last seen</th></tr></thead><tbody id="workers"></tbody></table></div></div>
-  <div class="card section"><h2>All jobs</h2><div class="scroll"><table><thead><tr><th>Kind</th><th>Progress</th><th>Leased</th><th>Failed</th><th>Priority</th><th>Created</th><th>ID</th></tr></thead><tbody id="jobs"></tbody></table></div></div>
+  <div class="card section"><h2>Workers</h2><div class="scroll"><table><thead><tr><th>Status</th><th>Name</th><th>Platform</th><th>CPU / RAM</th><th>Battery / Temp</th><th>Capabilities</th><th>Last seen</th><th>Actions</th></tr></thead><tbody id="workers"></tbody></table></div></div>
+  <div class="card section"><div class="sectionhead"><div><h2>All jobs</h2><div class="hint">Clearing jobs deletes queued, leased, completed, and failed work-unit records.</div></div><button id="clearJobs" class="danger">Clear all jobs</button></div><div class="scroll"><table><thead><tr><th>Kind</th><th>Progress</th><th>Leased</th><th>Failed</th><th>Priority</th><th>Created</th><th>ID</th><th>Actions</th></tr></thead><tbody id="jobs"></tbody></table></div></div>
   <div id="error" class="error"></div>
 </div>
 <script>
@@ -94,6 +94,18 @@ function objectiveLabel(o){return o?`${esc(o.direction)} · ${esc(o.path)}`:'—
 async function jsonFetch(path,options={}){const r=await fetch(path,options);let d=null;try{d=await r.json()}catch(_){ }if(!r.ok)throw new Error(d?.detail||`HTTP ${r.status}`);return d}
 async function pairingDecision(id,approve){
  try{await jsonFetch(`/pairing/request/${encodeURIComponent(id)}/${approve?'approve':'deny'}`,{method:'POST',headers:tokenHeaders()});await refresh()}catch(e){$('error').textContent=e.message}
+}
+async function deleteWorker(id,name){
+ if(!confirm(`Remove worker ${name || id}? Any leased work from this worker will be released back to the queue.`))return;
+ try{const d=await jsonFetch(`/workers/${encodeURIComponent(id)}`,{method:'DELETE',headers:tokenHeaders()});$('error').textContent=`Removed worker ${d.deleted_worker}; released ${d.released_work_units} leased unit(s).`;await refresh()}catch(e){$('error').textContent=e.message}
+}
+async function deleteJob(id){
+ if(!confirm(`Delete job ${id}? This removes all of its work units and results.`))return;
+ try{const d=await jsonFetch(`/jobs/${encodeURIComponent(id)}`,{method:'DELETE',headers:tokenHeaders()});$('error').textContent=`Deleted ${d.deleted_jobs} job and ${d.deleted_work_units} work unit(s).`;await refresh()}catch(e){$('error').textContent=e.message}
+}
+async function clearAllJobs(){
+ if(!confirm('Clear every job in the All jobs section? This removes queued, leased, completed, and failed work units.'))return;
+ try{const d=await jsonFetch('/jobs',{method:'DELETE',headers:tokenHeaders()});$('error').textContent=`Cleared ${d.deleted_jobs} job(s) and ${d.deleted_work_units} work unit(s).`;await refresh()}catch(e){$('error').textContent=e.message}
 }
 function renderPairings(items){
  $('pairingsPending').textContent=items.length;$('pairingBadge').textContent=items.length;$('pairingCard').classList.toggle('hidden',items.length===0);
@@ -110,9 +122,9 @@ async function refresh(){
   ]);
   localStorage.setItem('swarmAdminToken',token); $('dot').className='dot ok'; $('state').textContent='Connected · auto-refreshing every 3 seconds'; $('error').textContent='';
   $('workersOnline').textContent=d.workers.filter(w=>w.online).length; $('workersTotal').textContent=d.workers.length; $('experimentsTotal').textContent=e.experiments.length; $('jobsTotal').textContent=d.jobs.length; $('artifacts').textContent=d.artifacts.count+' · '+bytes(d.artifacts.bytes);renderPairings(p.requests||[]);
-  $('workers').innerHTML=d.workers.length?d.workers.map(w=>`<tr><td class="${w.online?'online':'offline'}">${w.online?'● Online':'● Offline'}</td><td><b>${esc(w.name)}</b><br><small>${esc(w.id).slice(0,12)}</small></td><td>${esc(w.os_name)}<br><small>${esc(w.arch)}</small></td><td>${w.cores} cores<br><small>${w.memory_mb?Math.round(w.memory_mb/1024*10)/10+' GB':'—'}</small></td><td>${w.battery_pct==null?'—':w.battery_pct+'%'}${w.charging?' ⚡':''}<br><small>${w.temperature_c==null?'—':w.temperature_c+' °C'}</small></td><td>${(w.capabilities||[]).slice(0,12).map(c=>`<span class="pill">${esc(c)}</span>`).join('')}</td><td>${age(w.last_seen)}</td></tr>`).join(''):'<tr><td colspan="7" class="empty">No workers enrolled yet.</td></tr>';
+  $('workers').innerHTML=d.workers.length?d.workers.map(w=>`<tr><td class="${w.online?'online':'offline'}">${w.online?'● Online':'● Offline'}</td><td><b>${esc(w.name)}</b><br><small>${esc(w.id).slice(0,12)}</small></td><td>${esc(w.os_name)}<br><small>${esc(w.arch)}</small></td><td>${w.cores} cores<br><small>${w.memory_mb?Math.round(w.memory_mb/1024*10)/10+' GB':'—'}</small></td><td>${w.battery_pct==null?'—':w.battery_pct+'%'}${w.charging?' ⚡':''}<br><small>${w.temperature_c==null?'—':w.temperature_c+' °C'}</small></td><td>${(w.capabilities||[]).slice(0,12).map(c=>`<span class="pill">${esc(c)}</span>`).join('')}</td><td>${age(w.last_seen)}</td><td><button class="small danger" onclick="deleteWorker('${esc(w.id)}','${esc(w.name)}')">Remove</button></td></tr>`).join(''):'<tr><td colspan="8" class="empty">No workers enrolled yet.</td></tr>';
   $('experiments').innerHTML=e.experiments.length?e.experiments.map(x=>`<tr><td><b>${esc(x.name)}</b><br><small>${esc(x.experiment_id).slice(0,12)}</small></td><td>${esc(x.task)}</td><td>${x.generation||0}</td><td>${x.done||0} / ${x.units||0}</td><td>${x.queued||0} / ${x.leased||0}</td><td class="${x.failed?'warn':''}">${x.failed||0}</td><td>${objectiveLabel(x.objective)}</td><td><button class="small secondary" onclick="showExperiment('${esc(x.experiment_id)}')">Results</button> <button class="small secondary" onclick="refineExperiment('${esc(x.experiment_id)}')">Refine</button></td></tr>`).join(''):'<tr><td colspan="8" class="empty">No experiments yet. Launch one above.</td></tr>';
-  $('jobs').innerHTML=d.jobs.length?d.jobs.map(j=>`<tr><td><b>${esc(j.kind)}</b></td><td>${j.done||0} / ${j.units||0}</td><td>${j.leased||0}</td><td>${j.failed||0}</td><td>${j.priority}</td><td>${new Date(j.created_at*1000).toLocaleString()}</td><td><small>${esc(j.id).slice(0,12)}</small></td></tr>`).join(''):'<tr><td colspan="7" class="empty">No jobs submitted yet.</td></tr>';
+  $('jobs').innerHTML=d.jobs.length?d.jobs.map(j=>`<tr><td><b>${esc(j.kind)}</b></td><td>${j.done||0} / ${j.units||0}</td><td>${j.leased||0}</td><td>${j.failed||0}</td><td>${j.priority}</td><td>${new Date(j.created_at*1000).toLocaleString()}</td><td><small>${esc(j.id).slice(0,12)}</small></td><td><button class="small danger" onclick="deleteJob('${esc(j.id)}')">Delete</button></td></tr>`).join(''):'<tr><td colspan="8" class="empty">No jobs submitted yet.</td></tr>';
  }catch(e){$('dot').className='dot bad';$('state').textContent='Not connected';$('error').textContent=e.message;}
 }
 async function showExperiment(id){
@@ -125,6 +137,7 @@ async function refineExperiment(id){
 $('toggleCreate').onclick=()=>{$('createPanel').classList.toggle('hidden')};$('cancelCreate').onclick=()=>{$('createPanel').classList.add('hidden')};
 $('submitExperiment').onclick=async()=>{const out=$('createMessage');out.className='';out.textContent='';try{const spec=JSON.parse($('experimentSpec').value);$('submitExperiment').disabled=true;const d=await jsonFetch('/experiments',{method:'POST',headers:{...tokenHeaders(),'Content-Type':'application/json'},body:JSON.stringify(spec)});out.className='success';out.textContent=`Launched ${d.units} work units · experiment ${d.experiment_id}`;await refresh()}catch(e){out.className='error';out.textContent=e.message}finally{$('submitExperiment').disabled=false}};
 $('connect').onclick=()=>{refresh();if(timer)clearInterval(timer);timer=setInterval(refresh,3000)};
+$('clearJobs').onclick=clearAllJobs;
 $('token').addEventListener('keydown',e=>{if(e.key==='Enter')$('connect').click()});
 const saved=(localStorage.getItem('swarmAdminToken')||'').replace(/[^a-fA-F0-9]/g,'');if(saved){$('token').value=saved;localStorage.setItem('swarmAdminToken',saved);$('connect').click()}
 </script>

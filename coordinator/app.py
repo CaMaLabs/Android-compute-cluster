@@ -750,6 +750,45 @@ def get_job(job_id: str):
     return result
 
 
+@app.delete("/jobs", dependencies=[Depends(admin_auth)])
+def clear_jobs():
+    with db() as conn:
+        job_count = conn.execute("SELECT COUNT(*) count FROM jobs").fetchone()["count"]
+        unit_count = conn.execute("SELECT COUNT(*) count FROM work_units").fetchone()["count"]
+        conn.execute("DELETE FROM jobs")
+    return {"ok": True, "deleted_jobs": job_count, "deleted_work_units": unit_count}
+
+
+@app.delete("/jobs/{job_id}", dependencies=[Depends(admin_auth)])
+def delete_job(job_id: str):
+    with db() as conn:
+        unit_count = conn.execute("SELECT COUNT(*) count FROM work_units WHERE job_id=?", (job_id,)).fetchone()["count"]
+        deleted = conn.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+        if deleted.rowcount != 1:
+            raise HTTPException(404, "job not found")
+    return {"ok": True, "deleted_jobs": 1, "deleted_work_units": unit_count}
+
+
+@app.delete("/workers/{worker_id}", dependencies=[Depends(admin_auth)])
+def delete_worker(worker_id: str):
+    now = time.time()
+    with db() as conn:
+        worker = conn.execute("SELECT id FROM workers WHERE id=?", (worker_id,)).fetchone()
+        if worker is None:
+            raise HTTPException(404, "worker not found")
+        released = conn.execute(
+            """
+            UPDATE work_units
+            SET status='queued', worker_id=NULL, lease_id=NULL, lease_until=NULL,
+                error=COALESCE(error, ?)
+            WHERE worker_id=? AND status='leased'
+            """,
+            (f"released after worker deletion at {now}", worker_id),
+        ).rowcount
+        conn.execute("DELETE FROM workers WHERE id=?", (worker_id,))
+    return {"ok": True, "deleted_worker": worker_id, "released_work_units": released}
+
+
 @app.get("/status", dependencies=[Depends(admin_auth)])
 def status():
     now = time.time()

@@ -11,6 +11,7 @@ import pairing as _pairing  # noqa: F401,E402
 import experiments as _experiments  # noqa: F401,E402
 import llm_experiments as _llm_experiments  # noqa: F401,E402
 import ollama_ui as _ollama_ui  # noqa: F401,E402
+import agent_proxy as _agent_proxy  # noqa: F401,E402
 import kaggle_cabt as _kaggle_cabt  # noqa: F401,E402
 import web as _web  # noqa: F401,E402
 

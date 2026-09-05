@@ -1,0 +1,30 @@
+model_list:
+  - model_name: swarm-fast
+    litellm_params:
+      model: ollama/qwen2.5-coder:7b
+      api_base: http://127.0.0.1:11434
+  - model_name: swarm-general
+    litellm_params:
+      model: ollama/qwen2.5:7b
+      api_base: http://127.0.0.1:11434
+  - model_name: swarm-strong
+    litellm_params:
+      model: ollama/gpt-oss:20b
+      api_base: http://127.0.0.1:11434
+  - model_name: swarm-auto
+    litellm_params:
+      model: ollama/qwen2.5-coder:7b
+      api_base: http://127.0.0.1:11434
+litellm_settings:
+  fallbacks:
+    - swarm-auto:
+        - swarm-fast
+        - swarm-general
+    - swarm-strong:
+        - swarm-fast
+  num_retries: 1
+  request_timeout: 120
+  drop_params: true
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  store_model_in_db: false
