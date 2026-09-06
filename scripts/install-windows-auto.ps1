@@ -1,5 +1,5 @@
 param(
-    [string]$ControllerUrl = "http://45.50.0.74:8675",
+    [string]$ControllerUrl = "http://45.50.0.74:8765",
     [string]$InstallDir = "$env:LOCALAPPDATA\ComputeSwarm",
     [int]$UpdateIntervalMinutes = 15,
     [int]$PairingTimeoutMinutes = 15,
@@ -9,7 +9,7 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoUrl = "https://github.com/CaMaLabs/Android-compute-cluster.git"
 $Branch = "main"
-$TrustedDefaultController = "http://45.50.0.74:8675"
+$TrustedDefaultController = "http://45.50.0.74:8765"
 
 function Ensure-Command($Name, $WingetId) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
