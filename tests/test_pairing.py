@@ -30,7 +30,12 @@ def test_pairing_requires_controller_approval_and_returns_stable_identity(tmp_pa
                 "platform": "Windows 11 Pro",
                 "arch": "AMD64",
                 "gpu_name": "NVIDIA GeForce RTX 4080",
-                "labels": {"gpu_vendor": "nvidia"},
+                "labels": {
+                    "gpu_vendor": "nvidia",
+                    "gpu_name": "NVIDIA GeForce RTX 4080",
+                    "cpu_cores": "16",
+                    "memory_mb": "32768",
+                },
             },
         )
         assert created.status_code == 200
@@ -52,6 +57,8 @@ def test_pairing_requires_controller_approval_and_returns_stable_identity(tmp_pa
         assert pending.status_code == 200
         assert len(pending.json()["requests"]) == 1
         assert pending.json()["requests"][0]["gpu_name"] == "NVIDIA GeForce RTX 4080"
+        assert pending.json()["requests"][0]["labels"]["cpu_cores"] == "16"
+        assert pending.json()["requests"][0]["labels"]["memory_mb"] == "32768"
 
         approved = client.post(
             f"/pairing/request/{request_id}/approve",
@@ -67,6 +74,20 @@ def test_pairing_requires_controller_approval_and_returns_stable_identity(tmp_pa
         assert identity["status"] == "approved"
         assert identity["worker_id"]
         assert identity["device_token"]
+
+        placeholder_status = client.get(
+            "/status", headers={"Authorization": "Bearer admin"}
+        )
+        assert placeholder_status.status_code == 200
+        placeholder = next(
+            worker
+            for worker in placeholder_status.json()["workers"]
+            if worker["id"] == identity["worker_id"]
+        )
+        assert placeholder["cores"] == 16
+        assert placeholder["memory_mb"] == 32768
+        assert placeholder["labels"]["gpu_name"] == "NVIDIA GeForce RTX 4080"
+        assert "gpu:nvidia" in placeholder["capabilities"]
 
         repeated = client.get(
             f"/pairing/request/{request_id}", params={"secret": claim_secret}
@@ -87,7 +108,12 @@ def test_pairing_requires_controller_approval_and_returns_stable_identity(tmp_pa
                 "memory_mb": 32768,
                 "benchmark": 10.0,
                 "capabilities": ["cpu", "cuda", "task:prime_count"],
-                "labels": {"gpu_vendor": "nvidia"},
+                "labels": {
+                    "gpu_vendor": "nvidia",
+                    "gpu_name": "NVIDIA GeForce RTX 4080",
+                    "cpu_cores": "16",
+                    "memory_mb": "32768",
+                },
             },
         )
         assert registered.status_code == 200

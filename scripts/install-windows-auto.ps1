@@ -78,6 +78,25 @@ try {
     throw "Cannot reach Compute Swarm controller at $ControllerUrl. $($_.Exception.Message)"
 }
 
+$CpuCores = 1
+$MemoryMb = $null
+try {
+    $ComputerSystem = Get-CimInstance Win32_ComputerSystem
+    if ($ComputerSystem.NumberOfLogicalProcessors -and [int]$ComputerSystem.NumberOfLogicalProcessors -gt 0) {
+        $CpuCores = [int]$ComputerSystem.NumberOfLogicalProcessors
+    }
+    if ($ComputerSystem.TotalPhysicalMemory -and [uint64]$ComputerSystem.TotalPhysicalMemory -gt 0) {
+        $MemoryMb = [int64][math]::Round([double]$ComputerSystem.TotalPhysicalMemory / 1MB)
+    }
+} catch {
+    Write-Warning "CPU/RAM inventory through CIM failed: $($_.Exception.Message)"
+    try {
+        if ([int]$env:NUMBER_OF_PROCESSORS -gt 0) { $CpuCores = [int]$env:NUMBER_OF_PROCESSORS }
+    } catch {}
+}
+Write-Host "Detected logical CPU processors: $CpuCores"
+if ($MemoryMb) { Write-Host "Detected physical RAM: $MemoryMb MB" }
+
 $GpuControllers = @()
 try {
     $GpuControllers = @(Get-CimInstance Win32_VideoController | Where-Object { $_.Name } | Select-Object -ExpandProperty Name)
@@ -186,7 +205,8 @@ print(f"CuPy CUDA ready: {count} device(s), validation={value:.1f}")
 
 $GpuVendor = if ($HasNvidia) { "nvidia" } elseif ($HasAmd) { "amd" } elseif ($HasIntel) { "intel" } else { "unknown" }
 $GpuName = Escape-SwarmValue (($GpuControllers -join " + "))
-$Labels = "gpu_vendor=$(Escape-SwarmValue $GpuVendor),gpu_name=$GpuName,installer=windows-auto"
+$MemoryLabel = if ($MemoryMb) { [string]$MemoryMb } else { "" }
+$Labels = "gpu_vendor=$(Escape-SwarmValue $GpuVendor),gpu_name=$GpuName,cpu_cores=$CpuCores,memory_mb=$MemoryLabel,installer=windows-auto"
 
 if (-not (Test-Path $IdentityFile)) {
     $OsCaption = "Windows"
@@ -198,8 +218,10 @@ if (-not (Test-Path $IdentityFile)) {
         arch = $env:PROCESSOR_ARCHITECTURE
         gpu_name = ($GpuControllers -join " + ")
         labels = @{
-            gpu_vendor = $GpuVendor
-            gpu_name = $GpuName
+            gpu_vendor = [string]$GpuVendor
+            gpu_name = [string]$GpuName
+            cpu_cores = [string]$CpuCores
+            memory_mb = [string]$MemoryLabel
             installer = "windows-auto"
         }
     }
@@ -265,14 +287,33 @@ $Runner = Join-Path $InstallDir "run-worker.ps1"
 & '$Python' '$RepoDir\worker\worker.py'
 "@ | Set-Content -Encoding UTF8 $Runner
 
-Write-Host "Testing worker initialization and accelerator discovery..."
+Write-Host "Testing worker initialization, hardware registration, and accelerator discovery..."
 . $EnvFile
-$Probe = Start-Process -FilePath $Python -ArgumentList @((Join-Path $RepoDir "worker\worker.py")) -PassThru -WindowStyle Hidden
-Start-Sleep -Seconds 8
-if ($Probe.HasExited -and $Probe.ExitCode -ne 0) {
-    throw "Worker exited during initialization with code $($Probe.ExitCode). Run $Runner manually to see the worker error."
+$ProbeStdout = Join-Path $ConfigDir "worker-probe.stdout.log"
+$ProbeStderr = Join-Path $ConfigDir "worker-probe.stderr.log"
+Remove-Item $ProbeStdout, $ProbeStderr -Force -ErrorAction SilentlyContinue
+$Probe = Start-Process -FilePath $Python -ArgumentList @("-u", (Join-Path $RepoDir "worker\worker.py")) -PassThru -WindowStyle Hidden -RedirectStandardOutput $ProbeStdout -RedirectStandardError $ProbeStderr
+$ProbeDeadline = (Get-Date).AddSeconds(45)
+$Registered = $false
+while ((Get-Date) -lt $ProbeDeadline) {
+    Start-Sleep -Seconds 1
+    if (Test-Path $ProbeStdout) {
+        $ProbeOutput = Get-Content $ProbeStdout -Raw -ErrorAction SilentlyContinue
+        if ($ProbeOutput -match 'joined swarm as ') {
+            $Registered = $true
+            break
+        }
+    }
+    if ($Probe.HasExited) { break }
 }
-if (-not $Probe.HasExited) { Stop-Process -Id $Probe.Id -Force }
+$ProbeOutput = if (Test-Path $ProbeStdout) { (Get-Content $ProbeStdout -Raw -ErrorAction SilentlyContinue).Trim() } else { "" }
+$ProbeError = if (Test-Path $ProbeStderr) { (Get-Content $ProbeStderr -Raw -ErrorAction SilentlyContinue).Trim() } else { "" }
+if (-not $Registered) {
+    if (-not $Probe.HasExited) { Stop-Process -Id $Probe.Id -Force -ErrorAction SilentlyContinue }
+    throw "Worker did not complete controller registration. stdout: $ProbeOutput stderr: $ProbeError"
+}
+if ($ProbeOutput) { Write-Host $ProbeOutput }
+if (-not $Probe.HasExited) { Stop-Process -Id $Probe.Id -Force -ErrorAction SilentlyContinue }
 
 $TaskName = "ComputeSwarmWorker"
 $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$Runner`""
@@ -302,8 +343,10 @@ $UpdateSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInst
 Register-ScheduledTask -TaskName $UpdateTaskName -Action $UpdateAction -Trigger $UpdateTrigger -Principal $Principal -Settings $UpdateSettings -Force | Out-Null
 
 Write-Host ""
-Write-Host "Compute Swarm worker installed, approved, and initialized."
+Write-Host "Compute Swarm worker installed, approved, registered, and initialized."
 Write-Host "Controller: $ControllerUrl"
+Write-Host "CPU logical processors: $CpuCores"
+if ($MemoryMb) { Write-Host "RAM: $MemoryMb MB" }
 Write-Host "GPU vendor: $GpuVendor"
 Write-Host "GPU(s): $($GpuControllers -join '; ')"
 if ($HasNvidia) { Write-Host "CuPy CUDA: validated" }

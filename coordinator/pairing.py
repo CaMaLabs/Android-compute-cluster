@@ -75,6 +75,24 @@ def _derive_device_token(request_id: str, claim_secret: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
+def _labels(row) -> dict[str, str]:
+    if not row["labels_json"]:
+        return {}
+    try:
+        value = __import__("json").loads(row["labels_json"])
+        return {str(k): str(v) for k, v in value.items()} if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def _label_int(labels: dict[str, str], key: str) -> int | None:
+    try:
+        value = int(labels.get(key, ""))
+        return value if value > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _public_request(row) -> dict[str, Any]:
     return {
         "request_id": row["id"],
@@ -83,7 +101,7 @@ def _public_request(row) -> dict[str, Any]:
         "platform": row["platform"],
         "arch": row["arch"],
         "gpu_name": row["gpu_name"],
-        "labels": {} if not row["labels_json"] else __import__("json").loads(row["labels_json"]),
+        "labels": _labels(row),
         "remote_addr": row["remote_addr"],
         "status": row["status"],
         "requested_at": row["requested_at"],
@@ -161,6 +179,13 @@ def pairing_status(request_id: str, secret: str = Query(min_length=20, max_lengt
         worker_id = row["worker_id"] or str(uuid.uuid4())
         existing = conn.execute("SELECT id FROM workers WHERE id=?", (worker_id,)).fetchone()
         if existing is None:
+            labels = _labels(row)
+            cores = min(_label_int(labels, "cpu_cores") or 1, 4096)
+            memory_mb = _label_int(labels, "memory_mb")
+            hardware_caps: list[str] = []
+            gpu_vendor = labels.get("gpu_vendor", "").strip().lower()
+            if gpu_vendor and gpu_vendor != "unknown":
+                hardware_caps.append(f"gpu:{gpu_vendor}")
             conn.execute(
                 """
                 INSERT INTO workers(
@@ -174,10 +199,10 @@ def pairing_status(request_id: str, secret: str = Query(min_length=20, max_lengt
                     row["os_name"] or "unknown",
                     row["platform"] or "unknown",
                     row["arch"] or "unknown",
-                    1,
-                    None,
+                    cores,
+                    memory_mb,
                     1.0,
-                    "[]",
+                    _json(hardware_caps),
                     row["labels_json"] or "{}",
                     None,
                     _token_hash(device_token),
