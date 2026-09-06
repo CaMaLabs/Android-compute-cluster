@@ -385,8 +385,8 @@ while ((Get-Date) -lt $ProbeDeadline) {
     }
     if ($Probe.HasExited) { break }
 }
-$ProbeOutput = if (Test-Path $ProbeStdout) { (Get-Content $ProbeStdout -Raw -ErrorAction SilentlyContinue).Trim() } else { "" }
-$ProbeError = if (Test-Path $ProbeStderr) { (Get-Content $ProbeStderr -Raw -ErrorAction SilentlyContinue).Trim() } else { "" }
+$ProbeOutput = if (Test-Path $ProbeStdout) { ([string](Get-Content $ProbeStdout -Raw -ErrorAction SilentlyContinue)).Trim() } else { "" }
+$ProbeError = if (Test-Path $ProbeStderr) { ([string](Get-Content $ProbeStderr -Raw -ErrorAction SilentlyContinue)).Trim() } else { "" }
 if (-not $Registered) {
     if (-not $Probe.HasExited) { Stop-Process -Id $Probe.Id -Force -ErrorAction SilentlyContinue }
     throw "Worker did not complete controller registration. stdout: $ProbeOutput stderr: $ProbeError"
