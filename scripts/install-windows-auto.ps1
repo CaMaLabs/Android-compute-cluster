@@ -81,9 +81,11 @@ function Ensure-Python312 {
     }
 
     Write-Host "No runnable Python 3.12 interpreter found; installing Python 3.12..."
-    winget install --id Python.Python.3.12 --exact --accept-package-agreements --accept-source-agreements
-    if ($LASTEXITCODE -ne 0) {
-        throw "winget failed while installing Python 3.12 with exit code $LASTEXITCODE."
+    $wingetOutput = @(winget install --id Python.Python.3.12 --exact --accept-package-agreements --accept-source-agreements 2>&1)
+    $wingetExit = $LASTEXITCODE
+    foreach ($line in $wingetOutput) { Write-Host $line }
+    if ($wingetExit -ne 0) {
+        throw "winget failed while installing Python 3.12 with exit code $wingetExit."
     }
 
     $env:PATH = [Environment]::GetEnvironmentVariable("PATH","Machine") + ";" + [Environment]::GetEnvironmentVariable("PATH","User")
