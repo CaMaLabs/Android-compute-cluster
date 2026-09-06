@@ -23,6 +23,80 @@ function Ensure-Command($Name, $WingetId) {
     }
 }
 
+function Test-Python312Candidate([string]$Command, [string[]]$PrefixArgs = @()) {
+    if (-not $Command) { return $null }
+    try {
+        $probe = & $Command @PrefixArgs -c "import os,sys; print(os.path.abspath(sys.executable)); raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 12)" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $probe) {
+            $resolved = ([string]($probe | Select-Object -Last 1)).Trim()
+            if ($resolved -and (Test-Path $resolved -PathType Leaf)) {
+                return [System.IO.Path]::GetFullPath($resolved)
+            }
+        }
+    } catch {}
+    return $null
+}
+
+function Find-Python312 {
+    $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($pythonCommand -and $pythonCommand.Source) {
+        $resolved = Test-Python312Candidate $pythonCommand.Source
+        if ($resolved) { return $resolved }
+    }
+
+    $launcher = Get-Command py.exe -ErrorAction SilentlyContinue
+    if ($launcher -and $launcher.Source) {
+        $resolved = Test-Python312Candidate $launcher.Source @("-3.12")
+        if ($resolved) { return $resolved }
+    }
+
+    $patterns = @(
+        "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe",
+        "$env:ProgramFiles\Python312\python.exe",
+        "$env:ProgramFiles\Python3*\python.exe",
+        "${env:ProgramFiles(x86)}\Python312\python.exe",
+        "${env:ProgramFiles(x86)}\Python3*\python.exe"
+    )
+    foreach ($pattern in $patterns) {
+        if (-not $pattern) { continue }
+        $candidates = @(Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue | Sort-Object FullName -Descending)
+        foreach ($candidate in $candidates) {
+            $resolved = Test-Python312Candidate $candidate.FullName
+            if ($resolved) { return $resolved }
+        }
+    }
+    return $null
+}
+
+function Ensure-Python312 {
+    $resolved = Find-Python312
+    if ($resolved) {
+        Write-Host "Using Python 3.12: $resolved"
+        return $resolved
+    }
+
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        throw "Python 3.12 is required and no runnable Python 3.12 interpreter was found. The Microsoft Store python app-execution alias does not count, and winget is not available to install Python automatically."
+    }
+
+    Write-Host "No runnable Python 3.12 interpreter found; installing Python 3.12..."
+    $wingetOutput = @(winget install --id Python.Python.3.12 --exact --accept-package-agreements --accept-source-agreements 2>&1)
+    $wingetExit = $LASTEXITCODE
+    foreach ($line in $wingetOutput) { Write-Host $line }
+    if ($wingetExit -ne 0) {
+        throw "winget failed while installing Python 3.12 with exit code $wingetExit."
+    }
+
+    $env:PATH = [Environment]::GetEnvironmentVariable("PATH","Machine") + ";" + [Environment]::GetEnvironmentVariable("PATH","User")
+    $resolved = Find-Python312
+    if (-not $resolved) {
+        throw "Python 3.12 installation completed, but a runnable interpreter still could not be located. The Windows Store app-execution alias may still be shadowing Python; the installer will not use that alias."
+    }
+    Write-Host "Using Python 3.12: $resolved"
+    return $resolved
+}
+
 function Escape-SwarmValue([string]$Value) {
     if ($null -eq $Value) { return "" }
     return ($Value -replace '[,=\r\n]', '_').Trim()
@@ -52,9 +126,7 @@ Write-Host "Compute Swarm automatic Windows worker installer"
 Write-Host "Controller: $ControllerUrl"
 
 Ensure-Command "git" "Git.Git"
-if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
-    Ensure-Command "python" "Python.Python.3.12"
-}
+$BasePython = Ensure-Python312
 
 $uri = [Uri]$ControllerUrl
 $AllowInsecure = 0
@@ -150,9 +222,16 @@ if (Test-Path (Join-Path $RepoDir ".git")) {
     if ($LASTEXITCODE -ne 0) { throw "git clone failed." }
 }
 
-python -m venv $VenvDir
-if ($LASTEXITCODE -ne 0) { throw "Failed to create Python virtual environment." }
-$Python = Join-Path $VenvDir "Scripts\python.exe"
+$VenvPython = Join-Path $VenvDir "Scripts\python.exe"
+if ((Test-Path $VenvDir) -and -not (Test-Path $VenvPython -PathType Leaf)) {
+    Write-Host "Removing incomplete Python virtual environment from the previous install attempt..."
+    Remove-Item $VenvDir -Recurse -Force
+}
+& $BasePython -m venv $VenvDir
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $VenvPython -PathType Leaf)) {
+    throw "Failed to create Python virtual environment using $BasePython."
+}
+$Python = $VenvPython
 & $Python -m pip install --upgrade pip
 if ($LASTEXITCODE -ne 0) { throw "Failed to upgrade pip." }
 & $Python -m pip install -r (Join-Path $RepoDir "worker\requirements.txt")
@@ -345,6 +424,7 @@ Register-ScheduledTask -TaskName $UpdateTaskName -Action $UpdateAction -Trigger 
 Write-Host ""
 Write-Host "Compute Swarm worker installed, approved, registered, and initialized."
 Write-Host "Controller: $ControllerUrl"
+Write-Host "Python: $BasePython"
 Write-Host "CPU logical processors: $CpuCores"
 if ($MemoryMb) { Write-Host "RAM: $MemoryMb MB" }
 Write-Host "GPU vendor: $GpuVendor"
