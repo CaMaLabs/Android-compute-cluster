@@ -54,10 +54,10 @@ internal static class Program
                           string.Equals(a, "--help", StringComparison.OrdinalIgnoreCase)))
         {
             Console.WriteLine("Double-click with no arguments for the configured controller:");
-            Console.WriteLine("  http://45.50.0.74:8675");
+            Console.WriteLine("  http://45.50.0.74:8765");
             Console.WriteLine();
             Console.WriteLine("Advanced PowerShell installer parameters can be forwarded, for example:");
-            Console.WriteLine("  ComputeSwarmWorkerInstaller.exe -ControllerUrl https://example.com:8675");
+            Console.WriteLine("  ComputeSwarmWorkerInstaller.exe -ControllerUrl https://example.com:8765");
             Console.WriteLine("  ComputeSwarmWorkerInstaller.exe -PairingTimeoutMinutes 30");
             PauseIfNeeded(doubleClicked);
             return 0;
